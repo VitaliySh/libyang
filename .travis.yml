@@ -1,15 +1,13 @@
+os: linux
+sudo: required
+dist: trusty
 language: c
 
 compiler:
   - clang
 
-os:
-  - linux
-
 branches:
   only:
-    - master
-    - devel
     - coverity
 
 before_install:
@@ -35,5 +33,7 @@ addons:
     build_command:   "make"
     branch_pattern: coverity
 
-script: cmake . && make && make test
+script:
+  # do nothing, everything here is done in coverity addon
+  - true
 
