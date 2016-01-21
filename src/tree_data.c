@@ -482,6 +482,10 @@ lyd_insert_setinvalid(struct lyd_node *node)
                 break;
             }
 
+            if (elem->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_ANYXML)) {
+                goto nextsibling;
+            }
+
             /* select next elem to process */
             /* go into children */
             next = elem->child;
@@ -686,6 +690,9 @@ lyd_validate(struct lyd_node *node, int options)
                 }
             }
         }
+        if (lyv_data_value(iter, options)) {
+            return EXIT_FAILURE;
+        }
 
         /* validation successful */
         iter->validity = LYD_VAL_OK;
@@ -733,11 +740,34 @@ lyd_dup_attr(struct ly_ctx *ctx, struct lyd_node *parent, struct lyd_attr *attr)
 API int
 lyd_unlink(struct lyd_node *node)
 {
-    struct lyd_node *iter;
+    struct lyd_node *iter, *next;
+    struct ly_set *set, *data;
+    unsigned int i, j;
 
     if (!node) {
         ly_errno = LY_EINVAL;
         return EXIT_FAILURE;
+    }
+
+    /* fix leafrefs */
+    LY_TREE_DFS_BEGIN(node, next, iter) {
+        /* the node is target of a leafref */
+        if ((iter->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST)) && iter->schema->child) {
+            set = (struct ly_set *)iter->schema->child;
+            for (i = 0; i < set->number; i++) {
+                data = lyd_get_node(iter, set->sset[i]);
+                if (data) {
+                    for (j = 0; j < data->number; j++) {
+                        if (((struct lyd_node_leaf_list *)data->dset[j])->value.leafref == iter) {
+                            /* remove reference to the node we are going to replace */
+                            ((struct lyd_node_leaf_list *)data->dset[j])->value.leafref = NULL;
+                        }
+                    }
+                    ly_set_free(data);
+                }
+            }
+        }
+        LY_TREE_DFS_END(node, next, iter)
     }
 
     /* unlink from siblings */
@@ -1038,7 +1068,7 @@ lyd_insert_attr(struct lyd_node *parent, const char *name, const char *value)
 API void
 lyd_free(struct lyd_node *node)
 {
-    struct lyd_node *next, *child;
+    struct lyd_node *next, *iter;
 
     if (!node) {
         return;
@@ -1046,14 +1076,14 @@ lyd_free(struct lyd_node *node)
 
     if (!(node->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_ANYXML))) {
         /* free children */
-        LY_TREE_FOR_SAFE(node->child, next, child) {
-            lyd_free(child);
+        LY_TREE_FOR_SAFE(node->child, next, iter) {
+            lyd_free(iter);
         }
     } else if (node->schema->nodetype == LYS_ANYXML) {
         lyxml_free(node->schema->module->ctx, ((struct lyd_node_anyxml *)node)->value);
-    } else {
+    } else { /* LYS_LEAF | LYS_LEAFLIST */
         /* free value */
-        switch(((struct lyd_node_leaf_list *)node)->value_type) {
+        switch (((struct lyd_node_leaf_list *)node)->value_type) {
         case LY_TYPE_BINARY:
         case LY_TYPE_STRING:
             lydict_remove(node->schema->module->ctx, ((struct lyd_node_leaf_list *)node)->value.string);
@@ -1222,10 +1252,10 @@ lyd_compare(struct lyd_node *first, struct lyd_node *second, int unique)
     }
 }
 
-API struct lyd_set *
+API struct ly_set *
 lyd_get_node(const struct lyd_node *data, const struct lys_node *schema)
 {
-    struct lyd_set *ret, *ret_aux, *spath;
+    struct ly_set *ret, *ret_aux, *spath;
     const struct lys_node *siter;
     struct lyd_node *iter;
     unsigned int i, j;
@@ -1236,8 +1266,8 @@ lyd_get_node(const struct lyd_node *data, const struct lys_node *schema)
         return NULL;
     }
 
-    ret = lyd_set_new();
-    spath = lyd_set_new();
+    ret = ly_set_new();
+    spath = ly_set_new();
     if (!ret || !spath) {
         LOGMEM;
         goto error;
@@ -1263,7 +1293,7 @@ lyd_get_node(const struct lyd_node *data, const struct lys_node *schema)
             break;
         } else if (siter->nodetype & (LYS_CONTAINER | LYS_LEAF | LYS_LIST | LYS_ANYXML | LYS_NOTIF | LYS_RPC)) {
             /* standard data node */
-            lyd_set_add(spath, (void*)siter);
+            ly_set_add(spath, (void*)siter);
 
         } /* else skip the rest node types */
         siter = siter->parent;
@@ -1275,8 +1305,8 @@ lyd_get_node(const struct lyd_node *data, const struct lys_node *schema)
 
     /* start searching */
     LY_TREE_FOR((struct lyd_node *)data, iter) {
-        if (iter->schema == (struct lys_node*)spath->set[spath->number - 1]) {
-            lyd_set_add(ret, iter);
+        if (iter->schema == spath->sset[spath->number - 1]) {
+            ly_set_add(ret, iter);
         }
     }
     for (i = spath->number - 1; i; i--) {
@@ -1285,40 +1315,40 @@ lyd_get_node(const struct lyd_node *data, const struct lys_node *schema)
             break;
         }
 
-        ret_aux = lyd_set_new();
+        ret_aux = ly_set_new();
         if (!ret_aux) {
             LOGMEM;
             goto error;
         }
         for (j = 0; j < ret->number; j++) {
-            LY_TREE_FOR(ret->set[j]->child, iter) {
-                if (iter->schema == (struct lys_node*)spath->set[i - 1]) {
-                    lyd_set_add(ret_aux, iter);
+            LY_TREE_FOR(ret->dset[j]->child, iter) {
+                if (iter->schema == spath->sset[i - 1]) {
+                    ly_set_add(ret_aux, iter);
                 }
             }
         }
-        lyd_set_free(ret);
+        ly_set_free(ret);
         ret = ret_aux;
     }
 
-    lyd_set_free(spath);
+    ly_set_free(spath);
     return ret;
 
 error:
-    lyd_set_free(ret);
-    lyd_set_free(spath);
+    ly_set_free(ret);
+    ly_set_free(spath);
 
     return NULL;
 }
 
-API struct lyd_set *
-lyd_set_new(void)
+API struct ly_set *
+ly_set_new(void)
 {
-    return calloc(1, sizeof(struct lyd_set));
+    return calloc(1, sizeof(struct ly_set));
 }
 
 API void
-lyd_set_free(struct lyd_set *set)
+ly_set_free(struct ly_set *set)
 {
     if (!set) {
         return;
@@ -1329,10 +1359,10 @@ lyd_set_free(struct lyd_set *set)
 }
 
 API int
-lyd_set_add(struct lyd_set *set, struct lyd_node *node)
+ly_set_add(struct ly_set *set, void *node)
 {
     unsigned int i;
-    struct lyd_node **new;
+    void **new;
 
     if (!set || !node) {
         ly_errno = LY_EINVAL;
@@ -1363,7 +1393,7 @@ lyd_set_add(struct lyd_set *set, struct lyd_node *node)
 }
 
 API int
-lyd_set_rm_index(struct lyd_set *set, unsigned int index)
+ly_set_rm_index(struct ly_set *set, unsigned int index)
 {
     if (!set || (index + 1) > set->number) {
         ly_errno = LY_EINVAL;
@@ -1384,7 +1414,7 @@ lyd_set_rm_index(struct lyd_set *set, unsigned int index)
 }
 
 API int
-lyd_set_rm(struct lyd_set *set, struct lyd_node *node)
+ly_set_rm(struct ly_set *set, void *node)
 {
     unsigned int i;
 
@@ -1405,5 +1435,5 @@ lyd_set_rm(struct lyd_set *set, struct lyd_node *node)
         return EXIT_FAILURE;
     }
 
-    return lyd_set_rm_index(set, i);
+    return ly_set_rm_index(set, i);
 }
