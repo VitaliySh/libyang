@@ -340,7 +340,7 @@ cmd_data(const char *arg)
     optind = 0;
     while (1) {
         option_index = 0;
-        c = getopt_long(argc, argv, "hf:o:x:", long_options, &option_index);
+        c = getopt_long(argc, argv, "hf:o:sx:", long_options, &option_index);
         if (c == -1) {
             break;
         }
@@ -427,7 +427,7 @@ cmd_data(const char *arg)
 
         xml = lyxml_read_path(ctx, argv[optind], 0);
         if (!xml) {
-            fprintf(stderr, "Failed to parse XML data.\n");
+            fprintf(stderr, "Failed to parse XML data for automatic type detection.\n");
             goto cleanup;
         }
 
@@ -474,8 +474,7 @@ cmd_data(const char *arg)
     } else {
         data = lyd_parse_path(ctx, argv[optind], informat, options);
     }
-
-    if (data == NULL) {
+    if (ly_errno) {
         fprintf(stderr, "Failed to parse data.\n");
         goto cleanup;
     }
@@ -596,8 +595,7 @@ cmd_xpath(const char *arg)
 
     /* data file */
     data = lyd_parse_path(ctx, argv[optind], LYD_XML, 0);
-
-    if (data == NULL) {
+    if (ly_errno) {
         fprintf(stderr, "Failed to parse data.\n");
         goto cleanup;
     }
