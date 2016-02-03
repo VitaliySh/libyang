@@ -80,7 +80,9 @@ typedef union lyd_value_u {
     int64_t dec64;               /**< decimal64: value = dec64 / 10^fraction-digits  */
     struct lys_type_enum *enm;   /**< pointer to the schema definition of the enumeration value */
     struct lys_ident *ident;     /**< pointer to the schema definition of the identityref value */
-    struct lyd_node *instance;   /**< instance-identifier, pointer to the referenced data tree node */
+    struct lyd_node *instance;   /**< pointer to the instance-identifier target, note that if the tree was modified,
+                                      the target (address) can be invalid - the pointer is correctly checked and updated
+                                      by lyd_validate() */
     int8_t int8;                 /**< 8-bit signed integer */
     int16_t int16;               /**< 16-bit signed integer */
     int32_t int32;               /**< 32-bit signed integer */
@@ -265,6 +267,10 @@ struct lyd_node_anyxml {
 #define LYD_OPT_OBSOLETE   0x0400 /**< Raise an error when an obsolete statement (status set to obsolete) is used. */
 #define LYD_OPT_NOSIBLINGS 0x0800 /**< Parse only a single XML tree from the input. This option applies only to
                                        XML input data. */
+#define LYD_OPT_TRUSTED    0x1000 /**< Data comes from a trusted source and it is not needed to validate them. Data
+                                       are connected with the schema, but the most validation checks (mandatory nodes,
+                                       list instance uniqueness, etc.) are not performed. This option does not make
+                                       sense for lyd_validate() so it is ignored by this function. */
 
 /**@} parseroptions */
 

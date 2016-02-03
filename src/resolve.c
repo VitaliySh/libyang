@@ -2508,7 +2508,7 @@ resolve_predicate(const char *pred, struct unres_data *node_match)
                 mod = ly_ctx_get_module(ctx, str, NULL);
                 free(str);
 
-                if (resolve_data(mod, name, nam_len, node_match->node[j], &target_match)) {
+                if (resolve_data(mod, name, nam_len, node_match->node[j]->child, &target_match)) {
                     goto remove_instid;
                 }
             }
@@ -4012,7 +4012,8 @@ resolve_unres_data_item(struct lyd_node *node, enum UNRES_ITEM type, int first, 
     case UNRES_INSTID:
         assert(sleaf->type.base == LY_TYPE_INST);
         ly_errno = 0;
-        if (!resolve_instid(node, leaf->value_str, line)) {
+        leaf->value.instance = resolve_instid(node, leaf->value_str, line);
+        if (!leaf->value.instance) {
             if (ly_errno) {
                 return -1;
             } else if (sleaf->type.info.inst.req > -1) {
@@ -4021,7 +4022,7 @@ resolve_unres_data_item(struct lyd_node *node, enum UNRES_ITEM type, int first, 
                 }
                 return EXIT_FAILURE;
             } else {
-                LOGVRB("There is no instance of \"%s\", but is not required.", leaf->value_str);
+                LOGVRB("There is no instance of \"%s\", but it is not required.", leaf->value_str);
             }
         }
         break;
