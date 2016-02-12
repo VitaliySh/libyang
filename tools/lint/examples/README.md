@@ -79,25 +79,71 @@ clear
 add ietf-netconf-acm.yin
 ```
 
-**Malformed XML data**
+**Unknown data**
 
-Comand and its output:
+By default, yanglint ignores unknown data and no error is printed (you can
+compare real content of the `datastore.xml` file and what yanglint prints
+in the following command if you add `-f xml` option).
+
+Command and its output:
 
 ```
-> data -x edit config-missing-key.xml
-libyang[0]: Parser fails around the line 20.
-libyang[0]: Mixed opening (nam) and closing (name) element tags.
-libyang[0]: lyd_parse_xml: Invalid parameter.
+> data datastore.xml
+```
+
+To handle unknown data as error, use strict mode (`-s` option).
+
+Command and its output:
+
+```
+> data -s datastore.xml
+libyang[0]: Parser fails around the line 22.
+libyang[0]: Unknown element "interfaces".
 Failed to parse data.
 ```
 
-**State information in config XML**
+**Multiple top-level elements in a single document**
+
+In contrast to standard XML parsers, yanglint accepts not a well-formed
+XML documents with multiple top-level element. In YANG/NETCONF, this
+represents data defined by multiple data models.
+
+Preparation:
+
+Command and its output:
+
+```
+> clear
+> add ietf-netconf-acm.yin
+> add ietf-interfaces.yin
+> add ietf-ip.yin
+> add iana-if-type.yin
+```
+
+Command and its ouput:
+
+```
+> data -s datastore.xml
+```
+
+**Malformed XML data**
+
+Command and its output:
+
+```
+> data -x edit config-missing-key.xml
+libyang[0]: Parser fails around the line 19.
+libyang[0]: Mixed opening (nam) and closing (name) element tags.
+Failed to parse data.
+```
+
+**State information in edit-config XML**
 
 Comand and its output:
 
 ```
 > data -x edit config-unknown-element.xml
-libyang[0]: Parser fails around the line 25.
+libyang[0]: Parser fails around the line 24.
 libyang[0]: Unknown element "denied-operations".
 Failed to parse data.
 ```
@@ -108,7 +154,7 @@ Comand and its output:
 
 ```
 > data data-missing-key.xml
-libyang[0]: Parser fails around the line 7.
+libyang[0]: Parser fails around the line 6.
 libyang[0]: Missing required element "name" in "rule".
 Failed to parse data.
 ```
@@ -119,9 +165,8 @@ Comand and its output:
 
 ```
 > data data-malformed-xml.xml
-libyang[0]: Parser fails around the line 12.
+libyang[0]: Parser fails around the line 13.
 libyang[0]: Mixed opening (nam) and closing (rule) element tags.
-libyang[0]: lyd_parse_xml: Invalid parameter.
 Failed to parse data.
 ```
 
@@ -129,9 +174,8 @@ Comand and its output:
 
 ```
 > data data-malformed-xml2.xml
-libyang[0]: Parser fails around the line 8.
+libyang[0]: Parser fails around the line 7.
 libyang[0]: Mixed opening (module-name) and closing (name) element tags.
-libyang[0]: lyd_parse_xml: Invalid parameter.
 Failed to parse data.
 ```
 
@@ -141,7 +185,7 @@ Comand and its output:
 
 ```
 > data data-out-of-range-value.xml
-libyang[0]: Parser fails around the line 25.
+libyang[0]: Parser fails around the line 24.
 libyang[0]: Value "-1" is out of range or length.
 Failed to parse data.
 ```
@@ -161,7 +205,7 @@ Comand and its output:
 
 ```
 > data data-acm.xml
-libyang[0]: Parser fails around the line 26.
+libyang[0]: Parser fails around the line 25.
 libyang[0]: When condition "../denied-operations > 0" not satisfied.
 libyang[0]: There are unresolved data items left.
 Failed to parse data.

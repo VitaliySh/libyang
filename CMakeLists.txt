@@ -5,8 +5,8 @@ set(LIBYANG_DESCRIPTION "libyang is YANG data modelling language parser and tool
 
 # set version
 set(LIBYANG_MAJOR_VERSION 0)
-set(LIBYANG_MINOR_VERSION 5)
-set(LIBYANG_MICRO_VERSION 31)
+set(LIBYANG_MINOR_VERSION 6)
+set(LIBYANG_MICRO_VERSION 25)
 set(LIBYANG_VERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION}.${LIBYANG_MICRO_VERSION})
 set(LIBYANG_SOVERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION})
 
@@ -60,6 +60,7 @@ set(libsrc
 	src/printer.c
 	src/xpath.c
 	src/printer_yang.c
+	src/printer_yin.c
 	src/printer_xml.c
 	src/printer_tree.c
 	src/printer_info.c
@@ -82,6 +83,9 @@ set(headers
 add_library(yang SHARED ${libsrc})
 set_target_properties(yang PROPERTIES VERSION ${LIBYANG_VERSION} SOVERSION ${LIBYANG_SOVERSION})
 
+# link math
+target_link_libraries(yang m)
+
 # find pthreads
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 find_package(Threads REQUIRED)
@@ -103,8 +107,9 @@ if(PKG_CONFIG_FOUND)
 	# check that pkg-config includes the used path
 	execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE} --variable pc_path pkg-config RESULT_VARIABLE RETURN OUTPUT_VARIABLE PC_PATH ERROR_QUIET)
 	if(RETURN EQUAL 0)
-		string(FIND ${PC_PATH} "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig" PC_PATH_IDX)
-		if(PC_PATH_IDX EQUAL -1)
+		string(REGEX MATCH "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig" SUBSTR "${PC_PATH}")
+		string(LENGTH "${SUBSTR}" SUBSTR_LEN)
+		if(SUBSTR_LEN EQUAL 0)
 			message(WARNING "pkg-config will not detect the new package after installation, adjust PKG_CONFIG_PATH using \"export PKG_CONFIG_PATH=\${PKG_CONFIG_PATH}:${CMAKE_INSTALL_PREFIX}/lib/pkgconfig\".")
 		endif()
 	endif()

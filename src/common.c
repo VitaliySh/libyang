@@ -22,10 +22,15 @@
 #define _GNU_SOURCE
 
 #include <assert.h>
-#include <stdlib.h>
-#include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "common.h"
 #include "tree_internal.h"
@@ -35,12 +40,30 @@
 LY_ERR ly_errno_int = LY_EINT;
 static pthread_once_t ly_errno_once = PTHREAD_ONCE_INIT;
 static pthread_key_t ly_errno_key;
+#ifdef __linux__
+LY_ERR ly_errno_main = LY_SUCCESS;
+#endif
+
+static void
+ly_errno_free(void *ptr)
+{
+    /* in __linux__ we use static memory in the main thread,
+     * so this check is for programs terminating the main()
+     * function by pthread_exit() :)
+     */
+    if (ptr != &ly_errno_main) {
+        free(ptr);
+    }
+}
+
 static void
 ly_errno_createkey(void)
 {
-    if (pthread_key_create(&ly_errno_key, free)) {
-        LOGMEM;
-    }
+    int r;
+
+    /* initiate */
+    while ((r = pthread_key_create(&ly_errno_key, ly_errno_free)) == EAGAIN);
+    pthread_setspecific(ly_errno_key, NULL);
 }
 
 API LY_ERR *
@@ -48,25 +71,44 @@ ly_errno_location(void)
 {
     LY_ERR *retval;
 
-    if (pthread_once(&ly_errno_once, ly_errno_createkey)) {
-        return &ly_errno_int;
-    }
-
+    pthread_once(&ly_errno_once, ly_errno_createkey);
     retval = pthread_getspecific(ly_errno_key);
     if (!retval) {
-        /* first call */
-        retval = calloc(1, sizeof *retval);
+        /* prepare ly_errno storage */
+#ifdef __linux__
+        if (getpid() == syscall(SYS_gettid)) {
+            /* main thread - use global variable instead of thread-specific variable. */
+            retval = &ly_errno_main;
+        } else {
+#else
+        {
+#endif /* __linux__ */
+            retval = calloc(1, sizeof *retval);
+        }
+
         if (!retval) {
+            /* error */
             return &ly_errno_int;
         }
 
-        if (pthread_setspecific(ly_errno_key, retval)) {
-            return &ly_errno_int;
-        }
+        pthread_setspecific(ly_errno_key, retval);
     }
 
     return retval;
 }
+
+#ifndef  __USE_GNU
+
+char *get_current_dir_name(void)
+{
+    char tmp[PATH_MAX];
+
+    if (getcwd(tmp, sizeof(tmp)))
+        return strdup(tmp);
+    return NULL;
+}
+
+#endif
 
 const char *
 strpbrk_backwards(const char *s, const char *accept, unsigned int s_len)
@@ -134,10 +176,28 @@ strnodetype(LYS_NODE type)
 }
 
 const char *
-transform_json2xml(const struct lys_module *module, const char *expr, const char ***prefixes, const char ***namespaces,
-                   uint32_t *ns_count)
+transform_module_name2import_prefix(const struct lys_module *module, const char *module_name)
 {
-    const char *in, *id;
+    uint16_t i;
+
+    if (!strcmp(module->name, module_name)) {
+        return module->prefix;
+    }
+
+    for (i = 0; i < module->imp_size; ++i) {
+        if (!strcmp(module->imp[i].module->name, module_name)) {
+            return module->imp[i].prefix;
+        }
+    }
+
+    return NULL;
+}
+
+static const char *
+_transform_json2xml(const struct lys_module *module, const char *expr, int schema, const char ***prefixes,
+                    const char ***namespaces, uint32_t *ns_count)
+{
+    const char *in, *id, *prefix;
     char *out, *col, *name;
     size_t out_size, out_used, id_len;
     const struct lys_module *mod;
@@ -152,7 +212,7 @@ transform_json2xml(const struct lys_module *module, const char *expr, const char
     }
 
     in = expr;
-    out_size = strlen(in)+1;
+    out_size = strlen(in) + 1;
     out = malloc(out_size);
     if (!out) {
         LOGMEM;
@@ -165,27 +225,38 @@ transform_json2xml(const struct lys_module *module, const char *expr, const char
         /* we're finished, copy the remaining part */
         if (!col) {
             strcpy(&out[out_used], in);
-            out_used += strlen(in)+1;
+            out_used += strlen(in) + 1;
             assert(out_size == out_used);
             return lydict_insert_zc(module->ctx, out);
         }
-        id = strpbrk_backwards(col-1, "/ [", (col-in)-1);
+        id = strpbrk_backwards(col - 1, "/ [", (col - in) - 1);
         if ((id[0] == '/') || (id[0] == ' ') || (id[0] == '[')) {
             ++id;
         }
-        id_len = col-id;
+        id_len = col - id;
 
         /* get the module */
-        name = strndup(id, id_len);
-        mod = ly_ctx_get_module(module->ctx, name, NULL);
-        free(name);
-        if (!mod) {
-            LOGVAL(LYE_INMOD_LEN, 0, id_len, id);
-            goto fail;
+        if (!schema) {
+            name = strndup(id, id_len);
+            mod = ly_ctx_get_module(module->ctx, name, NULL);
+            free(name);
+            if (!mod) {
+                LOGVAL(LYE_INMOD_LEN, 0, id_len, id);
+                goto fail;
+            }
+            prefix = mod->prefix;
+        } else {
+            name = strndup(id, id_len);
+            prefix = transform_module_name2import_prefix(module, name);
+            free(name);
+            if (!prefix) {
+                LOGVAL(LYE_INMOD_LEN, 0, id_len, id);
+                goto fail;
+            }
         }
 
         /* remember the namespace definition (only if it's new) */
-        if (ns_count) {
+        if (!schema && ns_count) {
             for (i = 0; i < *ns_count; ++i) {
                 if ((*namespaces)[i] == mod->ns) {
                     break;
@@ -203,13 +274,13 @@ transform_json2xml(const struct lys_module *module, const char *expr, const char
                     LOGMEM;
                     goto fail;
                 }
-                (*prefixes)[*ns_count-1] = mod->prefix;
-                (*namespaces)[*ns_count-1] = mod->ns;
+                (*prefixes)[*ns_count - 1] = mod->prefix;
+                (*namespaces)[*ns_count - 1] = mod->ns;
             }
         }
 
         /* adjust out size */
-        out_size += strlen(mod->prefix)-id_len;
+        out_size += strlen(prefix) - id_len;
         out = ly_realloc(out, out_size);
         if (!out) {
             LOGMEM;
@@ -218,28 +289,43 @@ transform_json2xml(const struct lys_module *module, const char *expr, const char
 
         /* copy the data before prefix */
         strncpy(&out[out_used], in, id-in);
-        out_used += id-in;
+        out_used += id - in;
 
-        /* copy the model name */
-        strcpy(&out[out_used], mod->prefix);
-        out_used += strlen(mod->prefix);
+        /* copy the model prefix */
+        strcpy(&out[out_used], prefix);
+        out_used += strlen(prefix);
 
         /* copy ':' */
         out[out_used] = ':';
         ++out_used;
 
         /* finally adjust in pointer for next round */
-        in = col+1;
+        in = col + 1;
     }
 
     /* unreachable */
     LOGINT;
 
 fail:
-    free(*prefixes);
-    free(*namespaces);
+    if (!schema && ns_count) {
+        free(*prefixes);
+        free(*namespaces);
+    }
     free(out);
     return NULL;
+}
+
+const char *
+transform_json2xml(const struct lys_module *module, const char *expr, const char ***prefixes, const char ***namespaces,
+                   uint32_t *ns_count)
+{
+    return _transform_json2xml(module, expr, 0, prefixes, namespaces, ns_count);
+}
+
+const char *
+transform_json2schema(const struct lys_module *module, const char *expr)
+{
+    return _transform_json2xml(module, expr, 1, NULL, NULL, NULL);
 }
 
 const char *

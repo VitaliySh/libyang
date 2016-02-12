@@ -20,7 +20,6 @@
  *    software without specific prior written permission.
  */
 #define _GNU_SOURCE
-#define _XOPEN_SOURCE 700
 
 #include <assert.h>
 #include <ctype.h>
@@ -49,7 +48,7 @@
 static struct lyd_node *
 lyd_parse_(struct ly_ctx *ctx, const struct lys_node *parent, const char *data, LYD_FORMAT format, int options)
 {
-    struct lyxml_elem *xml;
+    struct lyxml_elem *xml, *xmlnext;
     struct lyd_node *result = NULL;
     int xmlopt = LYXML_PARSE_MULTIROOT;
 
@@ -66,8 +65,13 @@ lyd_parse_(struct ly_ctx *ctx, const struct lys_node *parent, const char *data, 
     case LYD_XML:
     case LYD_XML_FORMAT:
         xml = lyxml_parse_mem(ctx, data, xmlopt);
+        if (ly_errno) {
+            return NULL;
+        }
         result = lyd_parse_xml(ctx, &xml, options, parent);
-        lyxml_free(ctx, xml);
+        LY_TREE_FOR_SAFE(xml, xmlnext, xml) {
+            lyxml_free(ctx, xml);
+        }
         break;
     case LYD_JSON:
         result = lyd_parse_json(ctx, parent, data, options);
@@ -79,7 +83,7 @@ lyd_parse_(struct ly_ctx *ctx, const struct lys_node *parent, const char *data, 
 
     if (!result && !ly_errno) {
         /* is empty data tree really valid ? */
-        lyd_validate(NULL, options);
+        lyd_validate(NULL, options, ctx);
     }
     return result;
 }
@@ -576,7 +580,7 @@ static int
 lyd_insert_sibling(struct lyd_node *sibling, struct lyd_node *node, int before)
 {
     struct lys_node *par1, *par2;
-    struct lyd_node *iter, *last;
+    struct lyd_node *iter;
     int invalid = 0;
 
     if (sibling == node) {
@@ -595,23 +599,34 @@ lyd_insert_sibling(struct lyd_node *sibling, struct lyd_node *node, int before)
         return EXIT_FAILURE;
     }
 
-    if (node->parent != sibling->parent || lyp_is_rpc(node->schema)) {
-        /* it is not just moving under a parent node or it is in an RPC where
-         * nodes order matters, so the validation will be necessary */
-        invalid = 1;
+    if (node->parent != sibling->parent || !node->parent || lyp_is_rpc(node->schema)) {
+        /* a) it is not just moving under a parent node or
+         * b) it is top-level where we don't know if it is the same tree, or
+         * c) it is in an RPC where nodes order matters,
+         * so the validation will be necessary */
+        if (!node->parent) {
+            /* b) search in siblings */
+            for (iter = node->prev; iter != node; iter = iter->prev) {
+                if (iter == sibling) {
+                    break;
+                }
+            }
+            if (iter == node) {
+                /* node and siblings are not currently in the same data tree */
+                invalid = 1;
+            }
+        } else { /* a) and c) */
+            invalid = 1;
+        }
     }
 
-    if (node->parent || node->prev->next) {
+    if (node->parent || node->next || node->prev->next) {
         lyd_unlink(node);
     }
 
-    LY_TREE_FOR(node, iter) {
-        iter->parent = sibling->parent;
-        last = iter;
-
-        if (invalid) {
-            lyd_insert_setinvalid(iter);
-        }
+    node->parent = sibling->parent;
+    if (invalid) {
+        lyd_insert_setinvalid(node);
     }
 
     if (before) {
@@ -623,20 +638,20 @@ lyd_insert_sibling(struct lyd_node *sibling, struct lyd_node *node, int before)
             sibling->parent->child = node;
         }
         node->prev = sibling->prev;
-        sibling->prev = last;
-        last->next = sibling;
+        sibling->prev = node;
+        node->next = sibling;
     } else {
         if (sibling->next) {
             /* adding into a middle - fix the prev pointer of the node after inserted nodes */
-            last->next = sibling->next;
-            sibling->next->prev = last;
+            node->next = sibling->next;
+            sibling->next->prev = node;
         } else {
             /* at the end - fix the prev pointer of the first node */
             if (sibling->parent) {
-                sibling->parent->child->prev = last;
+                sibling->parent->child->prev = node;
             } else {
                 for (iter = sibling; iter->prev->next; iter = iter->prev);
-                iter->prev = last;
+                iter->prev = node;
             }
         }
         sibling->next = node;
@@ -1245,12 +1260,12 @@ lyd_compare(struct lyd_node *first, struct lyd_node *second, int unique)
             for (i = 0; i < slist->unique_size; i++) {
                 for (j = 0; j < slist->unique[i].expr_size; j++) {
                     /* first */
-                    diter = resolve_data_nodeid(slist->unique[i].expr[j], first->child);
+                    diter = resolve_data_descendant_schema_nodeid(slist->unique[i].expr[j], first->child);
                     if (diter) {
                         val1 = ((struct lyd_node_leaf_list *)diter)->value_str;
                     } else {
                         /* use default value */
-                        if (resolve_schema_nodeid(slist->unique[i].expr[j], first->schema->child, first->schema->module, LYS_LEAF, &snode)) {
+                        if (resolve_descendant_schema_nodeid(slist->unique[i].expr[j], first->schema->child, LYS_LEAF, &snode)) {
                             /* error, but unique expression was checked when the schema was parsed */
                             return -1;
                         }
@@ -1258,12 +1273,12 @@ lyd_compare(struct lyd_node *first, struct lyd_node *second, int unique)
                     }
 
                     /* second */
-                    diter = resolve_data_nodeid(slist->unique[i].expr[j], second->child);
+                    diter = resolve_data_descendant_schema_nodeid(slist->unique[i].expr[j], second->child);
                     if (diter) {
                         val2 = ((struct lyd_node_leaf_list *)diter)->value_str;
                     } else {
                         /* use default value */
-                        if (resolve_schema_nodeid(slist->unique[i].expr[j], second->schema->child, second->schema->module, LYS_LEAF, &snode)) {
+                        if (resolve_descendant_schema_nodeid(slist->unique[i].expr[j], second->schema->child, LYS_LEAF, &snode)) {
                             /* error, but unique expression was checked when the schema was parsed */
                             return -1;
                         }
@@ -1465,7 +1480,7 @@ lyd_get_list_keys(const struct lyd_node *list)
     }
 
     for (i = 0; i < slist->keys_size; ++i) {
-        key = resolve_data_nodeid(slist->keys[i]->name, list->child);
+        key = resolve_data_descendant_schema_nodeid(slist->keys[i]->name, list->child);
         if (key) {
             ly_set_add(set, key);
         }

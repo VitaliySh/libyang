@@ -41,15 +41,6 @@
 #include "tree_internal.h"
 #include "validation.h"
 
-static const struct internal_modules int_mods = {
-    .modules = {
-        {"ietf-yang-types", "2013-07-15"},
-        {"ietf-inet-types", "2013-07-15"},
-        {"ietf-yang-library", "2015-07-03"}
-    },
-    .count = LY_INTERNAL_MODULE_COUNT
-};
-
 API const struct lys_feature *
 lys_is_disabled(const struct lys_node *node, int recursive)
 {
@@ -254,7 +245,7 @@ repeat:
     }
 
     if (!next) {
-        if (lys_parent(last) == parent) {
+        if (!last || lys_parent(last) == parent) {
             /* no next element */
             return NULL;
         }
@@ -479,7 +470,8 @@ ly_check_mandatory(const struct lyd_node *data, const struct lys_node *schema)
     if (!data) { /* !data && schema */
         siter = schema;
     } else { /* data && !schema */
-        schema = siter = data->schema->child;
+        schema = data->schema;
+        siter = data->schema->child;
     }
 
 repeat:
@@ -1248,7 +1240,7 @@ lys_type_dup(struct lys_module *mod, struct lys_node *parent, struct lys_type *n
                 new->info.bits.bit[i].name = lydict_insert(mod->ctx, old->info.bits.bit[i].name, 0);
                 new->info.bits.bit[i].dsc = lydict_insert(mod->ctx, old->info.bits.bit[i].dsc, 0);
                 new->info.bits.bit[i].ref = lydict_insert(mod->ctx, old->info.bits.bit[i].ref, 0);
-                new->info.bits.bit[i].status = old->info.bits.bit[i].status;
+                new->info.bits.bit[i].flags = old->info.bits.bit[i].flags;
                 new->info.bits.bit[i].pos = old->info.bits.bit[i].pos;
             }
         }
@@ -1273,7 +1265,7 @@ lys_type_dup(struct lys_module *mod, struct lys_node *parent, struct lys_type *n
                 new->info.enums.enm[i].name = lydict_insert(mod->ctx, old->info.enums.enm[i].name, 0);
                 new->info.enums.enm[i].dsc = lydict_insert(mod->ctx, old->info.enums.enm[i].dsc, 0);
                 new->info.enums.enm[i].ref = lydict_insert(mod->ctx, old->info.enums.enm[i].ref, 0);
-                new->info.enums.enm[i].status = old->info.enums.enm[i].status;
+                new->info.enums.enm[i].flags = old->info.enums.enm[i].flags;
                 new->info.enums.enm[i].value = old->info.enums.enm[i].value;
             }
         }
@@ -1563,8 +1555,8 @@ lys_augment_dup(struct lys_module *module, struct lys_node *parent, struct lys_n
         new[i].module = old[i].module;
         new[i].nodetype = old[i].nodetype;
         /* this must succeed, it was already resolved once */
-        if (resolve_schema_nodeid(new[i].target_name, parent->child, new[i].module, LYS_AUGMENT,
-                                  (const struct lys_node **)&new[i].target)) {
+        if (resolve_augment_schema_nodeid(new[i].target_name, parent->child, NULL,
+                                          (const struct lys_node **)&new[i].target)) {
             LOGINT;
             free(new);
             return NULL;
@@ -1959,7 +1951,9 @@ const struct lys_module *
 lys_get_import_module(const struct lys_module *module, const char *prefix, int pref_len, const char *name, int name_len)
 {
     const struct lys_module *main_module;
-    int i, match;
+    int i;
+
+    assert(!prefix || !name);
 
     if (prefix && !pref_len) {
         pref_len = strlen(prefix);
@@ -1968,19 +1962,18 @@ lys_get_import_module(const struct lys_module *module, const char *prefix, int p
         name_len = strlen(name);
     }
 
-    main_module = module->type ? ((struct lys_submodule *)module)->belongsto : module;
-    if ((!prefix || (!strncmp(main_module->prefix, prefix, pref_len) && !main_module->prefix[pref_len])) && (!name
-                    || (!strncmp(main_module->name, name, name_len) && !main_module->name[name_len]))) {
+    main_module = (module->type ? ((struct lys_submodule *)module)->belongsto : module);
+
+    /* module own prefix, submodule own prefix, (sub)module own name */
+    if ((!prefix || (!module->type && !strncmp(main_module->prefix, prefix, pref_len) && !main_module->prefix[pref_len])
+                 || (module->type && !strncmp(module->prefix, prefix, pref_len) && !module->prefix[pref_len]))
+            && (!name || (!strncmp(main_module->name, name, name_len) && !main_module->name[name_len]))) {
         return main_module;
     }
 
     for (i = 0; i < module->imp_size; ++i) {
-        match = 0;
-        if (!prefix || (!strncmp(module->imp[i].prefix, prefix, pref_len) && !module->imp[i].prefix[pref_len])) {
-            match = 1;
-        }
-        if (match && (!name
-                || (!strncmp(module->imp[i].module->name, name, name_len) && !module->imp[i].module->name[name_len]))) {
+        if ((!prefix || (!strncmp(module->imp[i].prefix, prefix, pref_len) && !module->imp[i].prefix[pref_len]))
+                && (!name || (!strncmp(module->imp[i].module->name, name, name_len) && !module->imp[i].module->name[name_len]))) {
             return module->imp[i].module;
         }
     }
@@ -1990,49 +1983,16 @@ lys_get_import_module(const struct lys_module *module, const char *prefix, int p
 
 /* free_int_mods - flag whether to free the internal modules as well */
 static void
-module_free_common(struct lys_module *module, int free_int_mods, void (*private_destructor)(const struct lys_node *node, void *priv))
+module_free_common(struct lys_module *module, void (*private_destructor)(const struct lys_node *node, void *priv))
 {
     struct ly_ctx *ctx;
     struct lys_node *next, *iter;
     unsigned int i;
-    int j, l;
 
     assert(module->ctx);
     ctx = module->ctx;
 
-    /* as first step, free the imported modules */
-    for (i = 0; i < module->imp_size; i++) {
-        /* skip external modules from submodules' import */
-        if (module->imp[i].external) {
-            continue;
-        }
-
-        /* do not free internal modules */
-        if (!free_int_mods) {
-            for (j = 0; j < int_mods.count; ++j) {
-                if (module->imp[i].module && !strcmp(int_mods.modules[j].name, module->imp[i].module->name)
-                        && module->imp[i].module->rev
-                        && !strcmp(int_mods.modules[j].revision, module->imp[i].module->rev[0].date)) {
-                    break;
-                }
-            }
-            if (j < int_mods.count) {
-                continue;
-            }
-        }
-
-        /* get the imported module from the context and then free,
-         * this check is necessary because the imported module can
-         * be already removed
-         */
-        l = ctx->models.used;
-        for (j = 0; j < l; j++) {
-            if (ctx->models.list[j] == module->imp[i].module) {
-                lys_free(module->imp[i].module, free_int_mods, private_destructor);
-                break;
-            }
-        }
-    }
+    /* just free the import array, imported modules will stay in the context */
     free(module->imp);
 
     /* submodules don't have data tree, the data nodes
@@ -2073,7 +2033,7 @@ module_free_common(struct lys_module *module, int free_int_mods, void (*private_
         /* complete submodule free is done only from main module since
          * submodules propagate their includes to the main module */
         if (!module->type) {
-            lys_submodule_free(module->inc[i].submodule, free_int_mods, private_destructor);
+            lys_submodule_free(module->inc[i].submodule, private_destructor);
         }
     }
     free(module->inc);
@@ -2100,14 +2060,14 @@ module_free_common(struct lys_module *module, int free_int_mods, void (*private_
 }
 
 void
-lys_submodule_free(struct lys_submodule *submodule, int free_int_mods, void (*private_destructor)(const struct lys_node *node, void *priv))
+lys_submodule_free(struct lys_submodule *submodule, void (*private_destructor)(const struct lys_node *node, void *priv))
 {
     if (!submodule) {
         return;
     }
 
     /* common part with struct ly_module */
-    module_free_common((struct lys_module *)submodule, free_int_mods, private_destructor);
+    module_free_common((struct lys_module *)submodule, private_destructor);
 
     /* no specific items to free */
 
@@ -2484,7 +2444,7 @@ error:
 }
 
 void
-lys_free(struct lys_module *module, int free_int_mods, void (*private_destructor)(const struct lys_node *node, void *priv))
+lys_free(struct lys_module *module, void (*private_destructor)(const struct lys_node *node, void *priv), int remove_from_ctx)
 {
     struct ly_ctx *ctx;
     int i;
@@ -2495,12 +2455,12 @@ lys_free(struct lys_module *module, int free_int_mods, void (*private_destructor
 
     /* remove schema from the context */
     ctx = module->ctx;
-    if (ctx->models.used) {
+    if (remove_from_ctx && ctx->models.used) {
         for (i = 0; i < ctx->models.used; i++) {
             if (ctx->models.list[i] == module) {
-                /* replace the position in the list by the last module in the list */
+                /* move all the models to not change the order in the list */
                 ctx->models.used--;
-                ctx->models.list[i] = ctx->models.list[ctx->models.used];
+                memmove(&ctx->models.list[i], ctx->models.list[i + 1], (ctx->models.used - i) * sizeof *ctx->models.list);
                 ctx->models.list[ctx->models.used] = NULL;
                 /* we are done */
                 break;
@@ -2509,11 +2469,11 @@ lys_free(struct lys_module *module, int free_int_mods, void (*private_destructor
     }
 
     /* common part with struct ly_submodule */
-    module_free_common(module, free_int_mods, private_destructor);
+    module_free_common(module, private_destructor);
 
     /* specific items to free */
-    lydict_remove(module->ctx, module->ns);
-    lydict_remove(module->ctx, module->prefix);
+    lydict_remove(ctx, module->ns);
+    lydict_remove(ctx, module->prefix);
 
     free(module);
 }
@@ -2728,27 +2688,4 @@ lys_set_private(const struct lys_node *node, void *priv)
     ((struct lys_node *)node)->private = priv;
 
     return prev;
-}
-
-API const struct lys_node *
-lys_get_node(const struct lys_module *module, const char *nodeid)
-{
-    const struct lys_node *ret;
-
-    if (!module || !nodeid) {
-        ly_errno = LY_EINVAL;
-        return NULL;
-    }
-
-    if (nodeid[0] != '/') {
-        ly_errno = LY_EINVAL;
-        return NULL;
-    }
-
-    if (resolve_schema_nodeid(nodeid, NULL, module, LYS_AUGMENT, &ret)) {
-        ly_errno = LY_EINVAL;
-        return NULL;
-    }
-
-    return ret;
 }
