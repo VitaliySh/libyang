@@ -103,20 +103,16 @@ lys_get_sibling(const struct lys_node *siblings, const char *mod_name, int mod_n
     /* set mod correctly */
     parent = lys_parent(siblings);
     if (!parent) {
-        mod = siblings->module;
+        mod = lys_node_module(siblings);
     }
 
     /* try to find the node */
     node = NULL;
     while ((node = lys_getnext(node, parent, mod, LYS_GETNEXT_WITHCHOICE | LYS_GETNEXT_WITHCASE))) {
         if (!type || (node->nodetype & type)) {
-            /* modules need to always be checked, we want to skip augments (no other reason to check them) */
-            if (node->module->type) {
-                node_mod_name = ((struct lys_submodule *)node->module)->belongsto->name;
-            } else {
-                node_mod_name = node->module->name;
-            }
-            if (strncmp(node_mod_name, mod_name, mod_name_len) || node_mod_name[mod_name_len]) {
+            /* module name comparison */
+            node_mod_name = lys_node_module(node)->name;
+            if ((node_mod_name != mod_name) && (strncmp(node_mod_name, mod_name, mod_name_len) || node_mod_name[mod_name_len])) {
                 continue;
             }
 
@@ -138,8 +134,6 @@ lys_get_data_sibling(const struct lys_module *mod, const struct lys_node *siblin
                      const struct lys_node **ret)
 {
     const struct lys_node *node;
-    const struct lys_module *cur_mod;
-    int in_submod;
 
     assert(siblings && name);
     assert(!(type & (LYS_AUGMENT | LYS_USES | LYS_GROUPING | LYS_CHOICE | LYS_CASE | LYS_INPUT | LYS_OUTPUT)));
@@ -149,66 +143,27 @@ lys_get_data_sibling(const struct lys_module *mod, const struct lys_node *siblin
         siblings = siblings->prev;
     }
 
-    /* we start with the module itself, submodules come later */
-    in_submod = 0;
-
     if (!mod) {
         mod = siblings->module;
     }
-    cur_mod = mod;
 
-    while (1) {
-        /* try to find the node */
-        node = NULL;
-        while ((node = lys_getnext(node, siblings->parent, cur_mod, 0))) {
-            if (!type || (node->nodetype & type)) {
-                /* module check */
-                if (!node->module->type) {
-                    if (cur_mod != node->module) {
-                        continue;
-                    }
-                } else {
-                    /* both are submodules */
-                    if (cur_mod->type) {
-                        if (cur_mod != node->module) {
-                            continue;
-                        }
-                    } else {
-                        if (cur_mod != ((struct lys_submodule *)node->module)->belongsto) {
-                            continue;
-                        }
-                    }
-                }
-
-                /* direct name check */
-                if ((node->name == name) || !strcmp(node->name, name)) {
-                    if (ret) {
-                        *ret = node;
-                    }
-                    return EXIT_SUCCESS;
-                }
-            }
-        }
-
-        /* we're not top-level, search ended */
-        if (siblings->parent) {
-            break;
-        }
-
-        /* let's try the submodules */
-        while(in_submod != mod->inc_size) {
-            if (!mod->inc[in_submod].submodule) {
-                in_submod++;
+    /* try to find the node */
+    node = NULL;
+    while ((node = lys_getnext(node, siblings->parent, mod, 0))) {
+        if (!type || (node->nodetype & type)) {
+            /* module check */
+            if (lys_node_module(node) != lys_module(mod)) {
                 continue;
             }
 
-            cur_mod = (struct lys_module *)mod->inc[in_submod].submodule;
-            siblings = cur_mod->data;
+            /* direct name check */
+            if ((node->name == name) || !strcmp(node->name, name)) {
+                if (ret) {
+                    *ret = node;
+                }
+                return EXIT_SUCCESS;
+            }
         }
-        if (in_submod == mod->inc_size) {
-            break;
-        }
-        ++in_submod;
     }
 
     return EXIT_FAILURE;
@@ -623,7 +578,7 @@ lys_node_unlink(struct lys_node *node)
     /* unlink from data model if necessary */
     if (node->module) {
         /* get main module with data tree */
-        for (main_module = node->module; main_module->type; main_module = ((struct lys_submodule *)main_module)->belongsto);
+        main_module = lys_node_module(node);
         if (main_module->data == node) {
             main_module->data = node->next;
         }
@@ -795,7 +750,7 @@ lys_check_id(struct lys_node *node, struct lys_node *parent, struct lys_module *
         }
         /* go up */
         if (lys_find_grouping_up(node->name, start)) {
-            LOGVAL(LYE_DUPID, 0, "grouping", node->name);
+            LOGVAL(LYE_DUPID, 0, LY_VLOG_LYS, node, "grouping", node->name);
             return EXIT_FAILURE;
         }
         /* go down, because grouping can be defined after e.g. container in which is collision */
@@ -813,7 +768,7 @@ lys_check_id(struct lys_node *node, struct lys_node *parent, struct lys_module *
                 grp = NULL;
                 while ((grp = lys_get_next_grouping(grp, iter))) {
                     if (node->name == grp->name) {
-                        LOGVAL(LYE_DUPID, 0, "grouping", node->name);
+                        LOGVAL(LYE_DUPID, 0, LY_VLOG_LYS, node, "grouping", node->name);
                         return EXIT_FAILURE;
                     }
                 }
@@ -851,7 +806,7 @@ lys_check_id(struct lys_node *node, struct lys_node *parent, struct lys_module *
 
             if (iter->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_LIST | LYS_CONTAINER | LYS_CHOICE | LYS_ANYXML)) {
                 if (iter->module == node->module && iter->name == node->name) {
-                    LOGVAL(LYE_SPEC, 0, "Duplicated child identifier \"%s\" in \"%s\".", node->name,
+                    LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, node, "Duplicated child identifier \"%s\" in \"%s\".", node->name,
                            stop ? stop->name : "(sub)module");
                     return EXIT_FAILURE;
                 }
@@ -896,7 +851,7 @@ lys_check_id(struct lys_node *node, struct lys_node *parent, struct lys_module *
             }
 
             if (iter->module == node->module && iter->name == node->name) {
-                LOGVAL(LYE_DUPID, 0, "case", node->name);
+                LOGVAL(LYE_DUPID, 0, LY_VLOG_LYS, node, "case", node->name);
                 return EXIT_FAILURE;
             }
         }
@@ -938,7 +893,7 @@ lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys
         if (!(child->nodetype &
                 (LYS_ANYXML | LYS_CHOICE | LYS_CONTAINER | LYS_GROUPING | LYS_LEAF |
                  LYS_LEAFLIST | LYS_LIST | LYS_USES))) {
-            LOGVAL(LYE_SPEC, 0, "Unexpected substatement \"%s\" in \"%s\" (%s).",
+            LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, parent, "Unexpected substatement \"%s\" in \"%s\" (%s).",
                    strnodetype(child->nodetype), strnodetype(parent->nodetype), parent->name);
             return EXIT_FAILURE;
         }
@@ -947,7 +902,7 @@ lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys
     case LYS_CHOICE:
         if (!(child->nodetype &
                 (LYS_ANYXML | LYS_CASE | LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST | LYS_LIST))) {
-            LOGVAL(LYE_SPEC, 0, "Unexpected substatement \"%s\" in \"choice\" %s.",
+            LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, parent, "Unexpected substatement \"%s\" in \"choice\" %s.",
                    strnodetype(child->nodetype), parent->name);
             return EXIT_FAILURE;
         }
@@ -955,14 +910,14 @@ lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys
     case LYS_CASE:
         if (!(child->nodetype &
                 (LYS_ANYXML | LYS_CHOICE | LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST | LYS_LIST | LYS_USES))) {
-            LOGVAL(LYE_SPEC, 0, "Unexpected substatement \"%s\" in \"case\" %s.",
+            LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, parent, "Unexpected substatement \"%s\" in \"case\" %s.",
                    strnodetype(child->nodetype), parent->name);
             return EXIT_FAILURE;
         }
         break;
     case LYS_RPC:
         if (!(child->nodetype & (LYS_INPUT | LYS_OUTPUT | LYS_GROUPING))) {
-            LOGVAL(LYE_SPEC, 0, "Unexpected substatement \"%s\" in \"rpc\" %s.",
+            LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, parent, "Unexpected substatement \"%s\" in \"rpc\" %s.",
                    strnodetype(child->nodetype), parent->name);
             return EXIT_FAILURE;
         }
@@ -970,14 +925,14 @@ lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys
     case LYS_LEAF:
     case LYS_LEAFLIST:
     case LYS_ANYXML:
-        LOGVAL(LYE_SPEC, 0, "The \"%s\" statement (%s) cannot have any data substatement.",
+        LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, parent, "The \"%s\" statement (%s) cannot have any data substatement.",
                strnodetype(parent->nodetype), parent->name);
         return EXIT_FAILURE;
     case LYS_AUGMENT:
         if (!(child->nodetype &
                 (LYS_ANYXML | LYS_CASE | LYS_CHOICE | LYS_CONTAINER | LYS_LEAF
                 | LYS_LEAFLIST | LYS_LIST | LYS_USES))) {
-            LOGVAL(LYE_SPEC, 0, "Unexpected substatement \"%s\" in \"%s\" (%s).",
+            LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, parent, "Unexpected substatement \"%s\" in \"%s\" (%s).",
                    strnodetype(child->nodetype), strnodetype(parent->nodetype), parent->name);
             return EXIT_FAILURE;
         }
@@ -987,7 +942,7 @@ lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys
         if (!(child->nodetype &
                 (LYS_ANYXML | LYS_CHOICE | LYS_CONTAINER | LYS_LEAF | LYS_GROUPING
                 | LYS_LEAFLIST | LYS_LIST | LYS_USES | LYS_RPC | LYS_NOTIF | LYS_AUGMENT))) {
-            LOGVAL(LYE_SPEC, 0, "Unexpected substatement \"%s\" in (sub)module \"%s\"",
+            LOGVAL(LYE_SPEC, 0, LY_VLOG_LYS, parent, "Unexpected substatement \"%s\" in (sub)module \"%s\"",
                    strnodetype(child->nodetype), module->name);
             return EXIT_FAILURE;
         }
@@ -1057,30 +1012,29 @@ lys_parse_mem(struct ly_ctx *ctx, const char *data, LYS_INFORMAT format)
     return mod;
 }
 
-struct lys_submodule *
-lys_submodule_parse(struct lys_module *module, const char *data, LYS_INFORMAT format, struct unres_schema *unres)
+int
+lys_submodule_parse(struct lys_module *module, const char *data, LYS_INFORMAT format, struct unres_schema *unres, struct lys_submodule **submodule)
 {
-    struct lys_submodule *submod = NULL;
+    int ret;
 
     assert(module);
     assert(data);
 
     /* get the main module */
-    while(module->type) {
-        module = ((struct lys_submodule *)module)->belongsto;
-    }
+    module = lys_module(module);
 
     switch (format) {
     case LYS_IN_YIN:
-        submod = yin_read_submodule(module, data, unres);
+        ret = yin_read_submodule(module, data, unres, submodule);
         break;
     case LYS_IN_YANG:
     default:
         /* TODO */
+        ret = EXIT_FAILURE;
         break;
     }
 
-    return submod;
+    return ret;
 }
 
 API const struct lys_module *
@@ -1132,10 +1086,10 @@ lys_parse_fd(struct ly_ctx *ctx, int fd, LYS_INFORMAT format)
     return module;
 }
 
-struct lys_submodule *
-lys_submodule_read(struct lys_module *module, int fd, LYS_INFORMAT format, struct unres_schema *unres)
+int
+lys_submodule_read(struct lys_module *module, int fd, LYS_INFORMAT format, struct unres_schema *unres, struct lys_submodule **submodule)
 {
-    struct lys_submodule *submodule;
+    int ret;
     struct stat sb;
     char *addr;
 
@@ -1144,18 +1098,17 @@ lys_submodule_read(struct lys_module *module, int fd, LYS_INFORMAT format, struc
 
     if (fstat(fd, &sb) == -1) {
         LOGERR(LY_ESYS, "Failed to stat the file descriptor (%s).", strerror(errno));
-        return NULL;
+        return -1;
     }
     addr = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (addr == MAP_FAILED) {
         LOGERR(LY_EMEM,"Map file into memory failed (%s()).",__func__);
-        return NULL;
+        return -1;
     }
-    submodule = lys_submodule_parse(module, addr, format, unres);
+    ret = lys_submodule_parse(module, addr, format, unres, submodule);
     munmap(addr, sb.st_size);
 
-    return submodule;
-
+    return ret;
 }
 
 static struct lys_restr *
@@ -1962,7 +1915,7 @@ lys_get_import_module(const struct lys_module *module, const char *prefix, int p
         name_len = strlen(name);
     }
 
-    main_module = (module->type ? ((struct lys_submodule *)module)->belongsto : module);
+    main_module = lys_module(module);
 
     /* module own prefix, submodule own prefix, (sub)module own name */
     if ((!prefix || (!module->type && !strncmp(main_module->prefix, prefix, pref_len) && !main_module->prefix[pref_len])
@@ -2080,7 +2033,6 @@ lys_node_dup(struct lys_module *module, struct lys_node *parent, const struct ly
 {
     struct lys_node *retval = NULL, *child;
     struct ly_ctx *ctx = module->ctx;
-    const char *modname;
     int i, j, rc;
 
     struct lys_node_container *cont = NULL;
@@ -2252,8 +2204,7 @@ lys_node_dup(struct lys_module *module, struct lys_node *parent, const struct ly
         }
 
         if (choice_orig->dflt) {
-            modname = choice->module->type ? ((struct lys_submodule *)choice->module)->belongsto->name : choice->module->name;
-            rc = lys_get_sibling(choice->child, modname, 0, choice_orig->dflt->name, 0, LYS_ANYXML
+            rc = lys_get_sibling(choice->child, lys_node_module(retval)->name, 0, choice_orig->dflt->name, 0, LYS_ANYXML
                                          | LYS_CASE | LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST
                                          | LYS_LIST, (const struct lys_node **)&choice->dflt);
             if (rc) {
@@ -2329,9 +2280,8 @@ lys_node_dup(struct lys_module *module, struct lys_node *parent, const struct ly
 
             /* we managed to resolve it before, resolve it again manually */
             if (list_orig->keys[0]) {
-                modname = list->module->type ? ((struct lys_submodule *)list->module)->belongsto->name : list->module->name;
                 for (i = 0; i < list->keys_size; ++i) {
-                    rc = lys_get_sibling(list->child, modname, 0, list_orig->keys[i]->name, 0, LYS_LEAF,
+                    rc = lys_get_sibling(list->child, lys_node_module(retval)->name, 0, list_orig->keys[i]->name, 0, LYS_LEAF,
                                          (const struct lys_node **)&list->keys[i]);
                     if (rc) {
                         if (rc == EXIT_FAILURE) {
@@ -2655,9 +2605,15 @@ lys_features_list(const struct lys_module *module, uint8_t **states)
 }
 
 struct lys_module *
-lys_mainmodule(const struct lys_node *node)
+lys_node_module(const struct lys_node *node)
 {
     return node->module->type ? ((struct lys_submodule *)node->module)->belongsto : node->module;
+}
+
+struct lys_module *
+lys_module(const struct lys_module *module)
+{
+    return (module->type ? ((struct lys_submodule *)module)->belongsto : (struct lys_module *)module);
 }
 
 API struct lys_node *

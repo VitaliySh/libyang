@@ -230,11 +230,11 @@ yin_print_snode_common2(struct lyout *out, int level, const struct lys_node *nod
 static void
 yin_print_iffeature(struct lyout *out, int level, const struct lys_module *module, const struct lys_feature *feat)
 {
-    const struct lys_module *mod;
+    struct lys_module *mod;
 
     ly_print(out, "%*s<if-feature name=\"", LEVEL, INDENT);
-    mod = (feat->module->type ? ((struct lys_submodule *)feat->module)->belongsto : feat->module);
-    if (module != mod) {
+    mod = lys_module(feat->module);
+    if (lys_module(module) != mod) {
         ly_print(out, "%s:", transform_module_name2import_prefix(module, mod->name));
     }
     ly_print(out, "%s\"/>\n", feat->name);
@@ -302,23 +302,45 @@ yin_print_type(struct lyout *out, int level, const struct lys_module *module, co
     const char *str;
     struct lys_module *mod;
 
+    /* decide whether the type will have any substatements */
+    close = 1;
     switch (type->base) {
     case LY_TYPE_BINARY:
-        close = 1;
         if (type->info.binary.length) {
             close = 0;
         }
         break;
     case LY_TYPE_DEC64:
+        if (type->info.dec64.dig || type->info.dec64.range) {
+            close = 0;
+        }
+        break;
     case LY_TYPE_ENUM:
+        if (type->info.enums.count) {
+            close = 0;
+        }
+        break;
     case LY_TYPE_IDENT:
+        if (type->info.ident.ref) {
+            close = 0;
+        }
+        break;
     case LY_TYPE_BITS:
+        if (type->info.bits.count) {
+            close = 0;
+        }
+        break;
     case LY_TYPE_UNION:
+        if (type->info.uni.count) {
+            close = 0;
+        }
+        break;
     case LY_TYPE_LEAFREF:
-        close = 0;
+        if (type->info.lref.path) {
+            close = 0;
+        }
         break;
     case LY_TYPE_INST:
-        close = 1;
         if (type->info.inst.req) {
             close = 0;
         }
@@ -331,19 +353,16 @@ yin_print_type(struct lyout *out, int level, const struct lys_module *module, co
     case LY_TYPE_UINT16:
     case LY_TYPE_UINT32:
     case LY_TYPE_UINT64:
-        close = 1;
         if (type->info.num.range) {
             close = 0;
         }
         break;
     case LY_TYPE_STRING:
-        close = 1;
         if (type->info.str.length || type->info.str.pat_count) {
             close = 0;
         }
         break;
     default:
-        close = 1;
         break;
     }
 
@@ -382,7 +401,9 @@ yin_print_type(struct lyout *out, int level, const struct lys_module *module, co
             }
             break;
         case LY_TYPE_DEC64:
-            yin_print_unsigned(out, level, "fraction-digits", "value", type->info.dec64.dig);
+            if (type->info.dec64.dig) {
+                yin_print_unsigned(out, level, "fraction-digits", "value", type->info.dec64.dig);
+            }
             if (type->info.dec64.range) {
                 yin_print_restr(out, level, "range", type->info.dec64.range);
             }
@@ -407,14 +428,14 @@ yin_print_type(struct lyout *out, int level, const struct lys_module *module, co
             }
             break;
         case LY_TYPE_IDENT:
-            mod = type->info.ident.ref->module->type ?
-                            ((struct lys_submodule *)type->info.ident.ref->module)->belongsto :
-                            type->info.ident.ref->module;
-            if (module == mod) {
-                ly_print(out, "%*s<base name=\"%s\"/>\n", LEVEL, INDENT, type->info.ident.ref->name);
-            } else {
-                ly_print(out, "%*s<base name=\"%s:%s\"/>\n", LEVEL, INDENT,
-                         transform_module_name2import_prefix(module, mod->name), type->info.ident.ref->name);
+            if (type->info.ident.ref) {
+                mod = lys_module(type->info.ident.ref->module);
+                if (lys_module(module) == mod) {
+                    ly_print(out, "%*s<base name=\"%s\"/>\n", LEVEL, INDENT, type->info.ident.ref->name);
+                } else {
+                    ly_print(out, "%*s<base name=\"%s:%s\"/>\n", LEVEL, INDENT,
+                            transform_module_name2import_prefix(module, mod->name), type->info.ident.ref->name);
+                }
             }
             break;
         case LY_TYPE_INST:
@@ -437,9 +458,11 @@ yin_print_type(struct lyout *out, int level, const struct lys_module *module, co
             }
             break;
         case LY_TYPE_LEAFREF:
-            str = transform_json2schema(module, type->info.lref.path);
-            yin_print_open(out, level, "path", "value", str, 1);
-            lydict_remove(module->ctx, str);
+            if (type->info.lref.path) {
+                str = transform_json2schema(module, type->info.lref.path);
+                yin_print_open(out, level, "path", "value", str, 1);
+                lydict_remove(module->ctx, str);
+            }
             break;
         case LY_TYPE_STRING:
             if (type->info.str.length) {
@@ -664,6 +687,10 @@ yin_print_augment(struct lyout *out, int level, const struct lys_module *module,
     }
 
     LY_TREE_FOR(augment->child, sub) {
+        /* only our augment */
+        if (sub->parent != (struct lys_node *)augment) {
+            continue;
+        }
         yin_print_snode(out, level, sub,
                         LYS_CHOICE | LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST | LYS_LIST |
                         LYS_USES | LYS_ANYXML | LYS_CASE);
@@ -696,7 +723,7 @@ static void
 yin_print_identity(struct lyout *out, int level, const struct lys_ident *ident)
 {
     int close;
-    const struct lys_module *mod;
+    struct lys_module *mod;
 
     close = (yin_has_snode_common((struct lys_node *)ident) || ident->base ? 0 : 1);
 
@@ -707,8 +734,8 @@ yin_print_identity(struct lyout *out, int level, const struct lys_ident *ident)
         yin_print_snode_common(out, level, (struct lys_node *)ident);
         if (ident->base) {
             ly_print(out, "%*s<base name=\"", LEVEL, INDENT);
-            mod = (ident->base->module->type ? ((struct lys_submodule *)ident->base->module)->belongsto : ident->base->module);
-            if (ident->module != mod) {
+            mod = lys_module(ident->base->module);
+            if (lys_module(ident->module) != mod) {
                 ly_print(out, "%s:", transform_module_name2import_prefix(ident->module, mod->name));
             }
             ly_print(out, "%s\"/>\n", ident->base->name);
@@ -754,8 +781,8 @@ yin_print_container(struct lyout *out, int level, const struct lys_node *node)
     }
 
     LY_TREE_FOR(node->child, sub) {
-        /* augment and data from submodules */
-        if (sub->module != node->module) {
+        /* augments */
+        if (sub->parent != node) {
             continue;
         }
         yin_print_snode(out, level, sub,
@@ -789,8 +816,8 @@ yin_print_case(struct lyout *out, int level, const struct lys_node *node)
     }
 
     LY_TREE_FOR(node->child, sub) {
-        /* augment and data from submodules */
-        if (sub->module != node->module) {
+        /* augments */
+        if (sub->parent != node) {
             continue;
         }
         yin_print_snode(out, level, sub,
@@ -828,9 +855,9 @@ yin_print_choice(struct lyout *out, int level, const struct lys_node *node)
     }
 
     LY_TREE_FOR(node->child, sub) {
-        /* augment and data from submodules */
-        if (sub->module != node->module) {
-                continue;
+        /* augments */
+        if (sub->parent != node) {
+            continue;
         }
         yin_print_snode(out, level, sub,
                         LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST | LYS_LIST | LYS_ANYXML | LYS_CASE);
@@ -985,8 +1012,8 @@ yin_print_list(struct lyout *out, int level, const struct lys_node *node)
         yin_print_typedef(out, level, list->module, &list->tpdf[i]);
     }
     LY_TREE_FOR(node->child, sub) {
-        /* augment and data from submodules */
-        if (sub->module != node->module) {
+        /* augments */
+        if (sub->parent != node) {
             continue;
         }
         yin_print_snode(out, level, sub,
@@ -1002,7 +1029,7 @@ static void
 yin_print_grouping(struct lyout *out, int level, const struct lys_node *node)
 {
     int i;
-    struct lys_node *child;
+    struct lys_node *sub;
     struct lys_node_grp *grp = (struct lys_node_grp *)node;
 
     yin_print_open(out, level, "grouping", "name", node->name, 0);
@@ -1014,8 +1041,8 @@ yin_print_grouping(struct lyout *out, int level, const struct lys_node *node)
         yin_print_typedef(out, level, node->module, &grp->tpdf[i]);
     }
 
-    LY_TREE_FOR(node->child, child) {
-        yin_print_snode(out, level, child,
+    LY_TREE_FOR(node->child, sub) {
+        yin_print_snode(out, level, sub,
                         LYS_CHOICE | LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST | LYS_LIST |
                         LYS_USES | LYS_GROUPING | LYS_ANYXML);
     }
@@ -1029,15 +1056,15 @@ yin_print_uses(struct lyout *out, int level, const struct lys_node *node)
 {
     int i, close;
     struct lys_node_uses *uses = (struct lys_node_uses *)node;
-    const struct lys_module *mod;
+    struct lys_module *mod;
 
     close = (yin_has_nacmext(node) || yin_has_snode_common(node) || uses->features_size || uses->when
             || uses->refine_size || uses->augment_size ? 0 : 1);
 
     ly_print(out, "%*s<uses name=\"", LEVEL, INDENT);
     if (node->child) {
-        mod = (node->child->module->type ? ((struct lys_submodule *)node->child->module)->belongsto : node->child->module);
-        if (node->module != mod) {
+        mod = lys_node_module(node->child);
+        if (lys_node_module(node) != mod) {
             ly_print(out, "%s:", transform_module_name2import_prefix(node->module, mod->name));
         }
     }
@@ -1082,8 +1109,8 @@ yin_print_input_output(struct lyout *out, int level, const struct lys_node *node
     }
 
     LY_TREE_FOR(node->child, sub) {
-        /* augment and data from submodules */
-        if (sub->module != node->module) {
+        /* augments */
+        if (sub->parent != node) {
             continue;
         }
         yin_print_snode(out, level, sub,
@@ -1119,8 +1146,8 @@ yin_print_rpc(struct lyout *out, int level, const struct lys_node *node)
         }
 
         LY_TREE_FOR(node->child, sub) {
-            /* augment and data from submodules */
-            if (sub->module != node->module) {
+            /* augments */
+            if (sub->parent != node) {
                 continue;
             }
             yin_print_snode(out, level, sub, LYS_GROUPING | LYS_INPUT | LYS_OUTPUT);
@@ -1155,8 +1182,8 @@ yin_print_notif(struct lyout *out, int level, const struct lys_node *node)
         }
 
         LY_TREE_FOR(node->child, sub) {
-            /* augment and data from submodules */
-            if (sub->module != node->module) {
+            /* augments */
+            if (sub->parent != node) {
                 continue;
             }
             yin_print_snode(out, level, sub,
@@ -1361,8 +1388,9 @@ yin_print_model(struct lyout *out, const struct lys_module *module)
         yin_print_deviation(out, level, module, &module->deviation[i]);
     }
 
-    LY_TREE_FOR(module->data, node) {
+    LY_TREE_FOR(lys_module(module)->data, node) {
         if (node->module != module) {
+            /* data from submodules */
             continue;
         }
 
