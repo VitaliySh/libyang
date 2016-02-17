@@ -242,6 +242,7 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     struct lys_type_bit bit;
     pcre *precomp;
     int i, j, rc, err_offset;
+    int ret = -1;
     int64_t v, v_;
     int64_t p, p_;
 
@@ -258,18 +259,19 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
         goto error;
     }
     /* module name */
+    name = value;
     if (value[i]) {
         type->module_name = lydict_insert(module->ctx, value, i);
-        value += i;
-        if ((value[0] != ':') || (parse_identifier(value + 1) < 1)) {
-            LOGVAL(LYE_INCHAR, LOGLINE(yin), LY_VLOG_XML, yin, value[0], value);
+        name += i;
+        if ((name[0] != ':') || (parse_identifier(name + 1) < 1)) {
+            LOGVAL(LYE_INCHAR, LOGLINE(yin), LY_VLOG_XML, yin, name[0], name);
             lydict_remove(module->ctx, value);
             goto error;
         }
-        ++value;
+        ++name;
     }
 
-    rc = resolve_superior_type(value, type->module_name, module, parent, &type->der);
+    rc = resolve_superior_type(name, type->module_name, module, parent, &type->der);
     lydict_remove(module->ctx, value);
     if (rc == -1) {
         LOGVAL(LYE_INMOD, LOGLINE(yin), LY_VLOG_XML, yin, type->module_name);
@@ -277,7 +279,8 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
 
     /* the type could not be resolved or it was resolved to an unresolved typedef */
     } else if (rc == EXIT_FAILURE) {
-        return EXIT_FAILURE;
+        ret = EXIT_FAILURE;
+        goto error;
     }
     type->base = type->der->type.base;
 
@@ -630,7 +633,10 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
         if (!value) {
             goto error;
         }
-        if (unres_schema_add_str(module, unres, type, UNRES_TYPE_IDENTREF, value, LOGLINE(yin->child)) == -1) {
+        rc = unres_schema_add_str(module, unres, type, UNRES_TYPE_IDENTREF, value, LOGLINE(yin->child));
+        lydict_remove(module->ctx, value);
+
+        if (rc == -1) {
             goto error;
         }
         break;
@@ -892,7 +898,8 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
                 type->info.uni.count = 0;
 
                 if (rc == EXIT_FAILURE) {
-                    return EXIT_FAILURE;
+                    ret = EXIT_FAILURE;
+                    goto error;
                 }
                 goto error;
             }
@@ -918,7 +925,11 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     return EXIT_SUCCESS;
 
 error:
-    return -1;
+    if (type->module_name) {
+        lydict_remove(module->ctx, type->module_name);
+        type->module_name = NULL;
+    }
+    return ret;
 }
 
 /* logs directly */
@@ -937,7 +948,7 @@ fill_yin_typedef(struct lys_module *module, struct lys_node *parent, struct lyxm
     tpdf->name = lydict_insert(module->ctx, value, strlen(value));
 
     /* generic part - status, description, reference */
-    if (read_yin_common(module, NULL, (struct lys_node *)tpdf, yin, OPT_IDENT | OPT_MODULE)) {
+    if (read_yin_common(module, NULL, (struct lys_node *)tpdf, yin, OPT_MODULE)) {
         goto error;
     }
 
@@ -1115,7 +1126,7 @@ fill_yin_unique(struct lys_module *module, struct lys_node *parent, struct lyxml
 
         /* check that the expression does not repeat */
         for (j = 0; j < i; j++) {
-            if (unique->expr[j] == unique->expr[i]) {
+            if (ly_strequal(unique->expr[j], unique->expr[i])) {
                 LOGVAL(LYE_INARG, LOGLINE(yin), LY_VLOG_XML, yin, unique->expr[i], "unique");
                 LOGVAL(LYE_SPEC, 0, 0, NULL, "The identifier is not unique");
                 goto error;
@@ -1247,6 +1258,7 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
     struct lys_type *t = NULL;
     uint8_t *trg_must_size = NULL;
     struct lys_restr **trg_must = NULL;
+    struct unres_schema tmp_unres;
 
     ctx = module->ctx;
 
@@ -1262,13 +1274,65 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
         LOGVAL(LYE_INARG, LOGLINE(yin), LY_VLOG_XML, yin, dev->target_name, yin->name);
         goto error;
     }
-    if (dev_target->module == module) {
+    if (dev_target->module == lys_module(module)) {
         LOGVAL(LYE_SPEC, LOGLINE(yin), LY_VLOG_XML, yin, "Deviating own module is not allowed.");
         goto error;
     }
-    dev->target_module = dev_target->module;
     /* mark the target module as deviated */
-    dev->target_module->deviated = 1;
+    dev_target->module->deviated = 1;
+
+    /* copy our imports to the deviated module (deviations may need them to work) */
+    for (i = 0; i < module->imp_size; ++i) {
+        for (j = 0; j < dev_target->module->imp_size; ++j) {
+            if (module->imp[i].module == dev_target->module->imp[j].module) {
+                break;
+            }
+        }
+
+        if (j < dev_target->module->imp_size) {
+            /* import is already there */
+            continue;
+        }
+
+        /* copy the import, mark it as external */
+        ++dev_target->module->imp_size;
+        dev_target->module->imp = ly_realloc(dev_target->module->imp, dev_target->module->imp_size * sizeof *dev_target->module->imp);
+        if (!dev_target->module->imp) {
+            LOGMEM;
+            goto error;
+        }
+        dev_target->module->imp[dev_target->module->imp_size - 1].module = module->imp[i].module;
+        dev_target->module->imp[dev_target->module->imp_size - 1].prefix = lydict_insert(module->ctx, module->imp[i].prefix, 0);
+        memcpy(dev_target->module->imp[dev_target->module->imp_size - 1].rev, module->imp[i].rev, LY_REV_SIZE);
+        dev_target->module->imp[dev_target->module->imp_size - 1].external = 1;
+    }
+
+    /* copy ourselves to the deviated module as a special import (if we haven't yet, there could be more deviations of the same module) */
+    for (i = 0; i < dev_target->module->imp_size; ++i) {
+        if (dev_target->module->imp[i].module == module) {
+            break;
+        }
+    }
+
+    if (i == dev_target->module->imp_size) {
+        ++dev_target->module->imp_size;
+        dev_target->module->imp = ly_realloc(dev_target->module->imp, dev_target->module->imp_size * sizeof *dev_target->module->imp);
+        if (!dev_target->module->imp) {
+            LOGMEM;
+            goto error;
+        }
+        dev_target->module->imp[dev_target->module->imp_size - 1].module = module;
+        dev_target->module->imp[dev_target->module->imp_size - 1].prefix = lydict_insert(module->ctx, module->prefix, 0);
+        if (module->rev_size) {
+            memcpy(dev_target->module->imp[dev_target->module->imp_size - 1].rev, module->rev[0].date, LY_REV_SIZE);
+        } else {
+            memset(dev_target->module->imp[dev_target->module->imp_size - 1].rev, 0, LY_REV_SIZE);
+        }
+        dev_target->module->imp[dev_target->module->imp_size - 1].external = 2;
+    } else {
+        /* it could have been added by another deviating module that imported this deviating module */
+        dev_target->module->imp[i].external = 2;
+    }
 
     LY_TREE_FOR_SAFE(yin->child, next, child) {
         if (!child->ns || strcmp(child->ns->value, LY_NSYIN)) {
@@ -1345,9 +1409,20 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
                 goto error;
             }
 
+            /* you cannot remove a key leaf */
+            if ((dev_target->nodetype == LYS_LEAF) && dev_target->parent && (dev_target->parent->nodetype == LYS_LIST)) {
+                for (i = 0; i < ((struct lys_node_list *)dev_target->parent)->keys_size; ++i) {
+                    if (((struct lys_node_list *)dev_target->parent)->keys[i] == (struct lys_node_leaf *)dev_target) {
+                        LOGVAL(LYE_INARG, LOGLINE(develem), LY_VLOG_XML, develem, value, develem->name);
+                        LOGVAL(LYE_SPEC, 0, 0, NULL, "\"not-supported\" deviation cannot remove a list key.");
+                        goto error;
+                    }
+                }
+            }
 
-            /* remove target node */
-            lys_node_free(dev_target, NULL);
+            /* unlink and store the original node */
+            lys_node_unlink(dev_target);
+            dev->orig_node = dev_target;
 
             dev->deviate_size = 1;
             return EXIT_SUCCESS;
@@ -1362,6 +1437,17 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
             goto error;
         }
         d = &dev->deviate[dev->deviate_size];
+
+        /* store a shallow copy of the original node */
+        if (!dev->orig_node) {
+            memset(&tmp_unres, 0, sizeof tmp_unres);
+            dev->orig_node = lys_node_dup(dev_target->module, NULL, dev_target, 0, 0, &tmp_unres, 1);
+            /* just to be safe */
+            if (tmp_unres.count) {
+                LOGINT;
+                goto error;
+            }
+        }
 
         /* process deviation properties */
         LY_TREE_FOR_SAFE(develem->child, next, child) {
@@ -1774,7 +1860,7 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
 
                     /* find must to delete, we are ok with just matching conditions */
                     for (i = 0; i < *trg_must_size; i++) {
-                        if (d->must[d->must_size].expr == (*trg_must)[i].expr) {
+                        if (ly_strequal(d->must[d->must_size].expr, (*trg_must)[i].expr)) {
                             /* we have a match, free the must structure ... */
                             lys_restr_free(ctx, &((*trg_must)[i]));
                             /* ... and maintain the array */
@@ -1830,7 +1916,7 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
                         }
 
                         for (j = 0; j < d->unique[d->unique_size].expr_size; j++) {
-                            if (list->unique[i].expr[j] != d->unique[d->unique_size].expr[j]) {
+                            if (!ly_strequal(list->unique[i].expr[j], d->unique[d->unique_size].expr[j])) {
                                 break;
                             }
                         }
@@ -2286,7 +2372,7 @@ fill_yin_import(struct lys_module *module, struct lyxml_elem *yin, struct lys_im
         count = 0;
     } else {
         for (count = 0; module->ctx->models.parsing[count]; ++count) {
-            if (value == module->ctx->models.parsing[count]) {
+            if (ly_strequal(value, module->ctx->models.parsing[count])) {
                 LOGERR(LY_EVALID, "Circular import dependency on the module \"%s\".", value);
                 goto error;
             }
@@ -2310,7 +2396,7 @@ fill_yin_import(struct lys_module *module, struct lyxml_elem *yin, struct lys_im
     }
 
     /* remove the new module name now that its parsing is finished (even if failed) */
-    if (module->ctx->models.parsing[count] || (module->ctx->models.parsing[count - 1] != value)) {
+    if (module->ctx->models.parsing[count] || !ly_strequal(module->ctx->models.parsing[count - 1], value)) {
         LOGINT;
     }
     --count;
@@ -2345,7 +2431,7 @@ fill_yin_include(struct lys_module *module, struct lys_submodule *submodule, str
     char *module_data;
     void (*module_data_free)(char *module_data) = NULL;
     LYS_INFORMAT format = LYS_IN_UNKNOWN;
-    int count, i, ret;
+    int count, i;
 
     LY_TREE_FOR(yin->child, child) {
         if (!child->ns || strcmp(child->ns->value, LY_NSYIN)) {
@@ -2373,7 +2459,7 @@ fill_yin_include(struct lys_module *module, struct lys_submodule *submodule, str
 
     /* check that the submodule was not included yet (previous submodule could have included it) */
     for (i = 0; i < module->inc_size; ++i) {
-        if (module->inc[i].submodule && (module->inc[i].submodule->name == value)) {
+        if (module->inc[i].submodule && (ly_strequal(module->inc[i].submodule->name, value))) {
             /* copy the duplicate into the result */
             memcpy(inc, &module->inc[i], sizeof *inc);
 
@@ -2400,7 +2486,7 @@ fill_yin_include(struct lys_module *module, struct lys_submodule *submodule, str
         count = 0;
     } else {
         for (count = 0; module->ctx->models.parsing[count]; ++count) {
-            if (value == module->ctx->models.parsing[count]) {
+            if (ly_strequal(value, module->ctx->models.parsing[count])) {
                 LOGERR(LY_EVALID, "Circular include dependency on the submodule \"%s\".", value);
                 goto error;
             }
@@ -2423,7 +2509,7 @@ fill_yin_include(struct lys_module *module, struct lys_submodule *submodule, str
             module_data = module->ctx->module_clb(value, inc->rev[0] ? inc->rev : NULL, module->ctx->module_clb_data,
                                                   &format, &module_data_free);
             if (module_data) {
-                ret = lys_submodule_parse(module, module_data, format, unres, &inc->submodule);
+                inc->submodule = lys_submodule_parse(module, module_data, format, unres);
                 if (module_data_free) {
                     module_data_free(module_data);
                 } else {
@@ -2431,18 +2517,15 @@ fill_yin_include(struct lys_module *module, struct lys_submodule *submodule, str
                 }
             } else {
                 LOGERR(LY_EVALID, "User module retrieval callback failed!");
-                ret = -1;
             }
         } else {
-            ret = lyp_search_file(module->ctx, module, value, inc->rev[0] ? inc->rev : NULL, unres,
-                                  (struct lys_module **)&inc->submodule);
+            inc->submodule = (struct lys_submodule *)lyp_search_file(module->ctx, module, value,
+                                                                     inc->rev[0] ? inc->rev : NULL, unres);
         }
-    } else {
-        ret = 0;
     }
 
     /* remove the new submodule name now that its parsing is finished (even if failed) */
-    if (module->ctx->models.parsing[count] || (module->ctx->models.parsing[count - 1] != value)) {
+    if (module->ctx->models.parsing[count] || !ly_strequal(module->ctx->models.parsing[count - 1], value)) {
         LOGINT;
     }
     --count;
@@ -2454,7 +2537,7 @@ fill_yin_include(struct lys_module *module, struct lys_submodule *submodule, str
     }
 
     /* check the result */
-    if (ret) {
+    if (!inc->submodule) {
         LOGVAL(LYE_INARG, LOGLINE(yin), LY_VLOG_XML, yin, value, yin->name);
         LOGERR(LY_EVALID, "Including \"%s\" module into \"%s\" failed.", value, module->name);
         goto error;
@@ -2776,7 +2859,7 @@ error:
     while (root.child) {
         lyxml_free(module->ctx, root.child);
     }
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
 
     return NULL;
 }
@@ -2928,7 +3011,7 @@ read_yin_choice(struct lys_module *module, struct lys_node *parent, struct lyxml
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
 
     return NULL;
 }
@@ -3053,7 +3136,7 @@ read_yin_anyxml(struct lys_module *module, struct lys_node *parent, struct lyxml
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
 
     return NULL;
 }
@@ -3217,7 +3300,7 @@ read_yin_leaf(struct lys_module *module, struct lys_node *parent, struct lyxml_e
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
 
     return NULL;
 }
@@ -3427,7 +3510,7 @@ read_yin_leaflist(struct lys_module *module, struct lys_node *parent, struct lyx
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
 
     return NULL;
 }
@@ -3732,7 +3815,7 @@ read_yin_list(struct lys_module *module, struct lys_node *parent, struct lyxml_e
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
     while (root.child) {
         lyxml_free(module->ctx, root.child);
     }
@@ -3909,7 +3992,7 @@ read_yin_container(struct lys_module *module, struct lys_node *parent, struct ly
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
     while (root.child) {
         lyxml_free(module->ctx, root.child);
     }
@@ -4025,7 +4108,7 @@ read_yin_grouping(struct lys_module *module, struct lys_node *parent, struct lyx
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
     while (root.child) {
         lyxml_free(module->ctx, root.child);
     }
@@ -4153,7 +4236,7 @@ read_yin_input_output(struct lys_module *module, struct lys_node *parent, struct
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
     while (root.child) {
         lyxml_free(module->ctx, root.child);
     }
@@ -4287,7 +4370,7 @@ read_yin_notif(struct lys_module *module, struct lys_node *parent, struct lyxml_
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
     while (root.child) {
         lyxml_free(module->ctx, root.child);
     }
@@ -4424,7 +4507,7 @@ read_yin_rpc(struct lys_module *module, struct lys_node *parent, struct lyxml_el
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
     while (root.child) {
         lyxml_free(module->ctx, root.child);
     }
@@ -4567,7 +4650,7 @@ read_yin_uses(struct lys_module *module, struct lys_node *parent, struct lyxml_e
 
 error:
 
-    lys_node_free(retval, NULL);
+    lys_node_free(retval, NULL, 0);
 
     return NULL;
 }
@@ -4642,7 +4725,7 @@ read_sub_module(struct lys_module *module, struct lys_submodule *submodule, stru
                 goto error;
             }
             GETVAL(value, child, "module");
-            if (value != submodule->belongsto->name) {
+            if (!ly_strequal(value, submodule->belongsto->name)) {
                 LOGVAL(LYE_INARG, LOGLINE(child), LY_VLOG_XML, child, value, child->name);
                 goto error;
             }
@@ -4962,13 +5045,13 @@ read_sub_module(struct lys_module *module, struct lys_submodule *submodule, stru
                 memcpy(trg->rev[trg->rev_size].date, value, LY_REV_SIZE - 1);
                 free((char *)value);
 
-                if (trg->rev[0].dsc != trg->rev[trg->rev_size].dsc) {
+                if (!ly_strequal(trg->rev[0].dsc, trg->rev[trg->rev_size].dsc)) {
                     value = trg->rev[0].dsc;
                     trg->rev[0].dsc = trg->rev[trg->rev_size].dsc;
                     trg->rev[trg->rev_size].dsc = value;
                 }
 
-                if (trg->rev[0].ref != trg->rev[trg->rev_size].ref) {
+                if (!ly_strequal(trg->rev[0].ref, trg->rev[trg->rev_size].ref)) {
                     value = trg->rev[0].ref;
                     trg->rev[0].ref = trg->rev[trg->rev_size].ref;
                     trg->rev[trg->rev_size].ref = value;
@@ -5017,7 +5100,7 @@ read_sub_module(struct lys_module *module, struct lys_submodule *submodule, stru
                 if (submodule->imp[i].module == module->imp[j].module &&
                         !strcmp(submodule->imp[i].rev, module->imp[j].rev)) {
                     /* check prefix match */
-                    if (submodule->imp[i].prefix != module->imp[j].prefix) {
+                    if (!ly_strequal(submodule->imp[i].prefix, module->imp[j].prefix)) {
                         LOGVAL(LYE_INID, LOGLINE(yin), LY_VLOG_XML, yin, submodule->imp[i].prefix,
                                "non-matching prefixes of imported module in main module and submodule");
                         goto error;
@@ -5166,19 +5249,20 @@ error:
 }
 
 /* logs directly */
-int
-yin_read_submodule(struct lys_module *module, const char *data, struct unres_schema *unres, struct lys_submodule **submodule)
+struct lys_submodule *
+yin_read_submodule(struct lys_module *module, const char *data, struct unres_schema *unres)
 {
     struct lys_node *next, *elem;
     struct lyxml_elem *yin;
+    struct lys_submodule *submodule = NULL;
     const char *value;
     uint8_t i;
 
-    assert(module->ctx && data && submodule);
+    assert(module->ctx);
 
     yin = lyxml_parse_mem(module->ctx, data, 0);
     if (!yin) {
-        return -1;
+        return NULL;
     }
 
     /* check root element */
@@ -5193,62 +5277,70 @@ yin_read_submodule(struct lys_module *module, const char *data, struct unres_sch
         goto error;
     }
 
-    *submodule = calloc(1, sizeof **submodule);
-    if (!(*submodule)) {
+    submodule = calloc(1, sizeof *submodule);
+    if (!submodule) {
         LOGMEM;
         goto error;
     }
 
-    (*submodule)->ctx = module->ctx;
-    (*submodule)->name = lydict_insert(module->ctx, value, strlen(value));
-    (*submodule)->type = 1;
-    (*submodule)->belongsto = module;
+    submodule->ctx = module->ctx;
+    submodule->name = lydict_insert(submodule->ctx, value, strlen(value));
+    submodule->type = 1;
+    submodule->belongsto = module;
 
-    LOGVRB("Reading submodule \"%s\".", (*submodule)->name);
-    if (read_sub_module(module, *submodule, yin, unres)) {
+    LOGVRB("Reading submodule \"%s\".", submodule->name);
+    if (read_sub_module(module, submodule, yin, unres)) {
         goto error;
     }
 
     /* cleanup */
     lyxml_free(module->ctx, yin);
 
-    LOGVRB("Submodule \"%s\" successfully parsed.", (*submodule)->name);
+    LOGVRB("Submodule \"%s\" successfully parsed.", submodule->name);
 
-    return EXIT_SUCCESS;
+    return submodule;
 
 error:
     /* cleanup */
+    unres_schema_free((struct lys_module *)submodule, &unres);
     lyxml_free(module->ctx, yin);
 
-    if (!(*submodule)) {
+    if (!submodule) {
         LOGERR(ly_errno, "Submodule parsing failed.");
-        return -1;
+        return NULL;
     }
 
-    LOGERR(ly_errno, "Submodule \"%s\" parsing failed.", (*submodule)->name);
+    LOGERR(ly_errno, "Submodule \"%s\" parsing failed.", submodule->name);
 
-    /* warn about applied deviations */
-    for (i = 0; i < (*submodule)->deviation_size; ++i) {
-        if ((*submodule)->deviation[i].target_module) {
-            LOGERR(ly_errno, "Submodule parsing failed, but successfully deviated %smodule \"%s\".",
-                   ((*submodule)->deviation[i].target_module->type ? "sub" : ""),
-                   (*submodule)->deviation[i].target_module->name);
+    /* remove parsed data */
+    LY_TREE_FOR_SAFE(module->data, next, elem) {
+        if (elem->module == (struct lys_module *)submodule) {
+            lys_node_free(elem, NULL, 0);
+        }
+    }
+
+    /* remove applied deviations */
+    for (i = 0; i < submodule->deviation_size; ++i) {
+        if (submodule->deviation[i].orig_node) {
+            resolve_augment_schema_nodeid(submodule->deviation[i].target_name, NULL, module, (const struct lys_node **)&elem);
+            lys_node_switch(elem, submodule->deviation[i].orig_node);
         }
     }
 
     /* remove applied augments */
-    for (i = 0; i < (*submodule)->augment_size; ++i) {
-        if ((*submodule)->augment[i].target) {
-            LY_TREE_FOR_SAFE((*submodule)->augment[i].target->child, next, elem) {
-                if (elem->parent == (struct lys_node *)&(*submodule)->augment[i]) {
-                    lys_node_free(elem, NULL);
+    for (i = 0; i < submodule->augment_size; ++i) {
+        if (submodule->augment[i].target) {
+            LY_TREE_FOR_SAFE(submodule->augment[i].target->child, next, elem) {
+                if (elem->parent == (struct lys_node *)&submodule->augment[i]) {
+                    lys_node_free(elem, NULL, 0);
                 }
             }
         }
     }
 
-    /* leave unres and (*submodule) allocated for now */
-    return EXIT_FAILURE;
+    lys_submodule_free(submodule, NULL);
+
+    return NULL;
 }
 
 /* logs directly */
@@ -5372,12 +5464,11 @@ error:
 
     LOGERR(ly_errno, "Module \"%s\" parsing failed.", module->name);
 
-    /* warn about applied deviations */
+    /* remove applied deviations */
     for (i = 0; i < module->deviation_size; ++i) {
-        if (module->deviation[i].target_module) {
-            LOGERR(ly_errno, "Module parsing failed, but successfully deviated %smodule \"%s\".",
-                   (module->deviation[i].target_module->type ? "sub" : ""),
-                   module->deviation[i].target_module->name);
+        if (module->deviation[i].orig_node) {
+            resolve_augment_schema_nodeid(module->deviation[i].target_name, NULL, module, (const struct lys_node **)&elem);
+            lys_node_switch(elem, module->deviation[i].orig_node);
         }
     }
 
@@ -5386,7 +5477,7 @@ error:
         if (module->augment[i].target) {
             LY_TREE_FOR_SAFE(module->augment[i].target->child, next, elem) {
                 if (elem->parent == (struct lys_node *)&module->augment[i]) {
-                    lys_node_free(elem, NULL);
+                    lys_node_free(elem, NULL, 0);
                 }
             }
         }

@@ -72,10 +72,12 @@ char *get_current_dir_name(void);
  */
 extern volatile uint8_t ly_log_level;
 
-#define LY_ERR_MSG_SIZE 4092
+#define LY_ERR_MSG_SIZE 2044
 struct ly_err {
     LY_ERR no;
+    int path_index;
     char msg[LY_ERR_MSG_SIZE];
+    char path[LY_ERR_MSG_SIZE];
 };
 
 void ly_log(LY_LOG_LEVEL level, const char *format, ...);
@@ -283,5 +285,13 @@ const char *transform_schema2json(const struct lys_module *module, const char *e
  * @return Pointer to the new memory, NULL on error.
  */
 void *ly_realloc(void *ptr, size_t size);
+
+/**
+ * @brief Compare strings
+ * @param[in] s1 First string to compare
+ * @param[in] s2 Second string to compare
+ * @return 1 if both strings are the same, 0 if they differ.
+ */
+int ly_strequal(const char *s1, const char *s2);
 
 #endif /* LY_COMMON_H_ */

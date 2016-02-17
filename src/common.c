@@ -41,7 +41,7 @@ LY_ERR ly_errno_int = LY_EINT;
 static pthread_once_t ly_err_once = PTHREAD_ONCE_INIT;
 static pthread_key_t ly_err_key;
 #ifdef __linux__
-struct ly_err ly_err_main = {LY_SUCCESS, {0}};
+struct ly_err ly_err_main = {LY_SUCCESS, 0, {0}, {0}};
 #endif
 
 static void
@@ -113,7 +113,18 @@ ly_errmsg(void)
         return NULL;
     }
     return e->msg;
+}
 
+API const char *
+ly_errpath(void)
+{
+    struct ly_err *e;
+
+    e = ly_err_location();
+    if (!e) {
+        return NULL;
+    }
+    return &e->path[e->path_index];
 }
 
 #ifndef  __USE_GNU
@@ -537,4 +548,21 @@ ly_realloc(void *ptr, size_t size)
     }
 
     return new_mem;
+}
+
+int
+ly_strequal(const char *s1, const char *s2)
+{
+    if (s1 == s2) {
+        return 1;
+    } else if (!s1 || !s2) {
+        return 0;
+    } else {
+        for ( ; *s1 == *s2; s1++, s2++) {
+            if (*s1 == '\0') {
+                return 1;
+            }
+        }
+        return 0;
+    }
 }
