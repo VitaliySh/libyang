@@ -47,11 +47,15 @@ struct ly_err ly_err_main = {LY_SUCCESS, 0, {0}, {0}};
 static void
 ly_err_free(void *ptr)
 {
+#ifdef __linux__
     /* in __linux__ we use static memory in the main thread,
      * so this check is for programs terminating the main()
      * function by pthread_exit() :)
      */
     if (ptr != &ly_err_main) {
+#else
+    {
+#endif
         free(ptr);
     }
 }
@@ -551,7 +555,7 @@ ly_realloc(void *ptr, size_t size)
 }
 
 int
-ly_strequal(const char *s1, const char *s2)
+ly_strequal_(const char *s1, const char *s2)
 {
     if (s1 == s2) {
         return 1;

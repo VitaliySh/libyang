@@ -2229,7 +2229,7 @@ resolve_path_predicate_data(const char *pred, int first, uint32_t line,struct ly
             }
 
             if (!ly_strequal(((struct lyd_node_leaf_list *)source_match.node[0])->value_str,
-                             ((struct lyd_node_leaf_list *)dest_match.node[0])->value_str)) {
+                             ((struct lyd_node_leaf_list *)dest_match.node[0])->value_str, 1)) {
                 goto remove_leafref;
             }
 
@@ -3111,7 +3111,7 @@ resolve_base_ident_sub(const struct lys_module *module, struct lys_ident *ident,
                        struct lys_ident **ret)
 {
     uint32_t i, j;
-    struct lys_ident *base_iter = NULL;
+    struct lys_ident *base = NULL, *base_iter;
     struct lys_ident_der *der;
 
     assert(ret);
@@ -3122,41 +3122,48 @@ resolve_base_ident_sub(const struct lys_module *module, struct lys_ident *ident,
 
             if (!ident) {
                 /* just search for type, so do not modify anything, just return
-                 * the base identity pointer
-                 */
+                 * the base identity pointer */
                 *ret = &module->ident[i];
                 return EXIT_SUCCESS;
             }
 
-            /* we are resolving identity definition, so now update structures */
-            ident->base = base_iter = &module->ident[i];
-
-            break;
+            base = &module->ident[i];
+            goto matchfound;
         }
     }
 
     /* search submodules */
-    if (!base_iter) {
-        for (j = 0; j < module->inc_size && module->inc[j].submodule; j++) {
-            for (i = 0; i < module->inc[j].submodule->ident_size; i++) {
-                if (!strcmp(basename, module->inc[j].submodule->ident[i].name)) {
+    for (j = 0; j < module->inc_size && module->inc[j].submodule; j++) {
+        for (i = 0; i < module->inc[j].submodule->ident_size; i++) {
+            if (!strcmp(basename, module->inc[j].submodule->ident[i].name)) {
 
-                    if (!ident) {
-                        *ret = &module->inc[j].submodule->ident[i];
-                        return EXIT_SUCCESS;
-                    }
-
-                    ident->base = base_iter = &module->inc[j].submodule->ident[i];
-                    break;
+                if (!ident) {
+                    *ret = &module->inc[j].submodule->ident[i];
+                    return EXIT_SUCCESS;
                 }
+
+                base = &module->inc[j].submodule->ident[i];
+                goto matchfound;
             }
         }
     }
 
+matchfound:
     /* we found it somewhere */
-    if (base_iter) {
-        while (base_iter) {
-            for (der = base_iter->der; der && der->next; der = der->next);
+    if (base) {
+        /* check for circular reference */
+        for (base_iter = base; base_iter; base_iter = base_iter->base) {
+            if (ident == base_iter) {
+                LOGVAL(LYE_SPEC, 0, 0, NULL, "Circular reference of \"%s\" identity", basename);
+                return EXIT_FAILURE;
+            }
+        }
+        /* checks done, store the result */
+        ident->base = base;
+
+        /* maintain backlinks to the derived identitise */
+        while (base) {
+            for (der = base->der; der && der->next; der = der->next);
             if (der) {
                 der->next = malloc(sizeof *der);
                 der = der->next;
@@ -3170,7 +3177,7 @@ resolve_base_ident_sub(const struct lys_module *module, struct lys_ident *ident,
             der->next = NULL;
             der->ident = ident;
 
-            base_iter = base_iter->base;
+            base = base->base;
         }
         *ret = ident->base;
         return EXIT_SUCCESS;
@@ -3185,7 +3192,7 @@ resolve_base_ident_sub(const struct lys_module *module, struct lys_ident *ident,
  * @param[in] module Main module.
  * @param[in] ident Identity to use.
  * @param[in] basename Base name of the identity.
- * @param[in] parent Either "type" or "ident".
+ * @param[in] parent Either "type" or "identity".
  * @param[in] first Whether this is the first resolution try. Affects logging.
  * @param[in] line Line in the input file.
  * @param[in,out] type Type structure where we want to resolve identity. Can be NULL.
@@ -3242,11 +3249,17 @@ resolve_base_ident(const struct lys_module *module, struct lys_ident *ident, con
     /* search in the identified module ... */
     if (!resolve_base_ident_sub(module, ident, name, ret)) {
         goto success;
+    } else if (ly_errno) {
+        LOGVAL(LYE_LINE, line, 0, NULL);
+        return EXIT_FAILURE;
     }
     /* and all its submodules */
     for (i = 0; i < module->inc_size && module->inc[i].submodule; i++) {
         if (!resolve_base_ident_sub((struct lys_module *)module->inc[i].submodule, ident, name, ret)) {
             goto success;
+        } else if (ly_errno) {
+            LOGVAL(LYE_LINE, line, 0, NULL);
+            return EXIT_FAILURE;
         }
     }
 
@@ -3331,7 +3344,7 @@ resolve_choice_dflt(struct lys_node_choice *choic, const char *dflt)
             }
         }
 
-        if (ly_strequal(child->name, dflt) && (child->nodetype & (LYS_ANYXML | LYS_CASE
+        if (ly_strequal(child->name, dflt, 1) && (child->nodetype & (LYS_ANYXML | LYS_CASE
                 | LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST | LYS_LIST))) {
             return child;
         }
@@ -3699,7 +3712,7 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
         has_str = 1;
         ident = item;
 
-        rc = resolve_base_ident(mod, ident, base_name, "ident", first, line, NULL);
+        rc = resolve_base_ident(mod, ident, base_name, "identity", first, line, NULL);
         break;
     case UNRES_TYPE_IDENTREF:
         base_name = str_snode;
@@ -4184,7 +4197,7 @@ resolve_unres_data_item(struct lyd_node *node, enum UNRES_ITEM type, int first, 
 
         /* check that value matches */
         for (i = 0; i < matches.count; ++i) {
-            if (ly_strequal(leaf->value_str, ((struct lyd_node_leaf_list *)matches.node[i])->value_str)) {
+            if (ly_strequal(leaf->value_str, ((struct lyd_node_leaf_list *)matches.node[i])->value_str, 1)) {
                 leaf->value.leafref = matches.node[i];
                 break;
             }
